@@ -1813,6 +1813,753 @@ if (exists("hormone_treated") && nrow(hormone_treated) > 10) {
 }
 
 # ==============================================================================
+# PHASE 8: OVERALL SURVIVAL ANALYSIS
+# ==============================================================================
+
+cat("\n====================================\n")
+cat("PHASE 8: Overall Survival Analysis\n")
+cat("====================================\n\n")
+
+# ------------------------------------------------------------------------------
+# Step 8.1: Convert OS_STATUS to numeric if needed
+# ------------------------------------------------------------------------------
+
+cat("  Preparing overall survival data...\n")
+
+# Check and convert OS_STATUS
+if ("OS_STATUS" %in% colnames(merged_data)) {
+  if (!is.numeric(merged_data$OS_STATUS)) {
+    cat("    - Converting OS_STATUS to numeric format...\n")
+    merged_data$OS_STATUS_NUMERIC <- case_when(
+      grepl("^1:", merged_data$OS_STATUS) ~ 1,
+      grepl("^0:", merged_data$OS_STATUS) ~ 0,
+      merged_data$OS_STATUS %in% c("1", "DECEASED", "Died", "Dead") ~ 1,
+      merged_data$OS_STATUS %in% c("0", "LIVING", "Alive", "Living") ~ 0,
+      TRUE ~ as.numeric(as.character(merged_data$OS_STATUS))
+    )
+    merged_data$OS_STATUS <- merged_data$OS_STATUS_NUMERIC
+  }
+
+  cat(sprintf("    - Patients with OS data: %d\n", sum(!is.na(merged_data$OS_MONTHS))))
+  cat(sprintf("    - Deaths: %d (%.1f%%)\n",
+              sum(merged_data$OS_STATUS == 1, na.rm = TRUE),
+              100 * mean(merged_data$OS_STATUS == 1, na.rm = TRUE)))
+}
+
+# ------------------------------------------------------------------------------
+# Step 8.2: Overall Survival by BLVRB Expression
+# ------------------------------------------------------------------------------
+
+if (all(c("OS_MONTHS", "OS_STATUS", "BLVRB_EXPRESSION_GROUP") %in% colnames(merged_data))) {
+
+  cat("\n  Analyzing overall survival by BLVRB expression...\n")
+
+  os_data <- merged_data %>%
+    dplyr::filter(!is.na(OS_MONTHS), !is.na(OS_STATUS), !is.na(BLVRB_EXPRESSION_GROUP))
+
+  if (nrow(os_data) > 50) {
+
+    # Create survival object
+    surv_obj_os <- Surv(time = os_data$OS_MONTHS, event = os_data$OS_STATUS)
+
+    # Fit survival curves
+    fit_os <- survfit(surv_obj_os ~ BLVRB_EXPRESSION_GROUP, data = os_data)
+
+    # Log-rank test
+    survdiff_os <- survdiff(surv_obj_os ~ BLVRB_EXPRESSION_GROUP, data = os_data)
+    logrank_p_os <- 1 - pchisq(survdiff_os$chisq, length(survdiff_os$n) - 1)
+
+    # Cox regression
+    cox_os <- coxph(surv_obj_os ~ BLVRB_EXPRESSION_GROUP, data = os_data)
+    cox_summary_os <- summary(cox_os)
+
+    hr_os <- cox_summary_os$conf.int[1]
+    hr_lower_os <- cox_summary_os$conf.int[3]
+    hr_upper_os <- cox_summary_os$conf.int[4]
+    cox_p_os <- cox_summary_os$coefficients[5]
+
+    cat(sprintf("    - Log-rank p-value: %.4f\n", logrank_p_os))
+    cat(sprintf("    - Hazard ratio: %.2f (95%% CI: %.2f-%.2f, p=%.4f)\n",
+                hr_os, hr_lower_os, hr_upper_os, cox_p_os))
+
+    # Figure 9: Overall Survival KM curve
+    p_km_os <- ggsurvplot(
+      fit_os,
+      data = os_data,
+      pval = TRUE,
+      pval.method = TRUE,
+      conf.int = TRUE,
+      risk.table = TRUE,
+      risk.table.height = 0.25,
+      palette = c("blue", "red"),
+      legend.labs = c("BLVRB-low", "BLVRB-high"),
+      title = "Overall Survival by BLVRB Expression",
+      xlab = "Time (months)",
+      ylab = "Overall Survival Probability",
+      ggtheme = theme_bw(base_size = 12),
+      legend.title = "BLVRB Status"
+    )
+
+    p_km_os$plot <- p_km_os$plot +
+      annotate("text", x = max(os_data$OS_MONTHS, na.rm = TRUE) * 0.7,
+               y = 0.2,
+               label = sprintf("HR = %.2f (%.2f-%.2f)\np = %.4f",
+                             hr_os, hr_lower_os, hr_upper_os, cox_p_os),
+               size = 4, hjust = 0)
+
+    ggsave(file.path(output_dir, "figures", "Figure9_KM_Overall_Survival.png"),
+           print(p_km_os),
+           width = 10, height = 8, dpi = 300)
+
+    cat("    - Figure 9 saved\n")
+  }
+}
+
+# ------------------------------------------------------------------------------
+# Step 8.3: OS by Chemotherapy and BLVRB
+# ------------------------------------------------------------------------------
+
+if (all(c("CHEMOTHERAPY", "OS_MONTHS", "OS_STATUS") %in% colnames(merged_data))) {
+
+  cat("\n  Analyzing OS by chemotherapy treatment...\n")
+
+  chemo_os_data <- merged_data %>%
+    dplyr::filter(CHEMOTHERAPY %in% c("YES", "NO"),
+           !is.na(OS_MONTHS), !is.na(OS_STATUS), !is.na(BLVRB_EXPRESSION_GROUP))
+
+  if (nrow(chemo_os_data) > 100) {
+
+    # Four-group analysis
+    chemo_os_data$Group_OS <- paste(chemo_os_data$BLVRB_EXPRESSION_GROUP,
+                                    chemo_os_data$CHEMOTHERAPY, sep = " + ")
+
+    surv_obj_chemo_os <- Surv(time = chemo_os_data$OS_MONTHS,
+                              event = chemo_os_data$OS_STATUS)
+
+    fit_chemo_os <- survfit(surv_obj_chemo_os ~ Group_OS, data = chemo_os_data)
+
+    # Figure 10: Four-group OS
+    p_km_chemo_os <- ggsurvplot(
+      fit_chemo_os,
+      data = chemo_os_data,
+      pval = TRUE,
+      conf.int = FALSE,
+      risk.table = TRUE,
+      risk.table.height = 0.3,
+      palette = c("darkblue", "lightblue", "darkred", "pink"),
+      title = "Overall Survival: BLVRB × Chemotherapy",
+      xlab = "Time (months)",
+      ylab = "Overall Survival Probability",
+      ggtheme = theme_bw(base_size = 11),
+      legend.title = "Group",
+      legend.labs = c("BLVRB-high + Chemo", "BLVRB-high + No chemo",
+                     "BLVRB-low + Chemo", "BLVRB-low + No chemo")
+    )
+
+    ggsave(file.path(output_dir, "figures", "Figure10_KM_OS_Chemo_Four_Groups.png"),
+           print(p_km_chemo_os),
+           width = 12, height = 9, dpi = 300)
+
+    cat("    - Figure 10 saved\n")
+  }
+}
+
+# ==============================================================================
+# PHASE 9: AGE-STRATIFIED ANALYSIS
+# ==============================================================================
+
+cat("\n====================================\n")
+cat("PHASE 9: Age-Stratified Analysis\n")
+cat("====================================\n\n")
+
+# ------------------------------------------------------------------------------
+# Step 9.1: Create Age Groups
+# ------------------------------------------------------------------------------
+
+if ("AGE_AT_DIAGNOSIS" %in% colnames(merged_data)) {
+
+  cat("  Creating age groups...\n")
+
+  merged_data$AGE_GROUP <- cut(
+    merged_data$AGE_AT_DIAGNOSIS,
+    breaks = c(0, 50, 65, Inf),
+    labels = c("< 50 years", "50-65 years", "> 65 years"),
+    include.lowest = TRUE
+  )
+
+  # Age group distribution
+  age_dist <- as.data.frame(table(merged_data$AGE_GROUP, useNA = "always"))
+  colnames(age_dist) <- c("Age_Group", "N")
+  age_dist$Percent <- 100 * age_dist$N / sum(age_dist$N)
+
+  cat("    - Age group distribution:\n")
+  print(age_dist)
+
+  # ------------------------------------------------------------------------------
+  # Step 9.2: BLVRB Expression by Age Group
+  # ------------------------------------------------------------------------------
+
+  cat("\n  Analyzing BLVRB expression by age groups...\n")
+
+  age_blvrb_data <- merged_data %>%
+    dplyr::filter(!is.na(AGE_GROUP), !is.na(BLVRB_EXPRESSION))
+
+  if (nrow(age_blvrb_data) > 0) {
+
+    # Statistical test
+    kw_age <- kruskal.test(BLVRB_EXPRESSION ~ AGE_GROUP, data = age_blvrb_data)
+
+    cat(sprintf("    - Kruskal-Wallis p-value: %.4f\n", kw_age$p.value))
+
+    # Figure 11: Boxplot by age
+    p_age_blvrb <- ggplot(age_blvrb_data,
+                          aes(x = AGE_GROUP, y = BLVRB_EXPRESSION, fill = AGE_GROUP)) +
+      geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+      geom_jitter(width = 0.2, alpha = 0.3, size = 0.5) +
+      scale_fill_brewer(palette = "Set3") +
+      labs(title = "BLVRB Expression by Age Group",
+           subtitle = sprintf("Kruskal-Wallis p = %.4f", kw_age$p.value),
+           x = "Age Group",
+           y = "BLVRB Expression (log2)") +
+      theme_bw(base_size = 12) +
+      theme(legend.position = "none")
+
+    ggsave(file.path(output_dir, "figures", "Figure11_BLVRB_by_Age.png"),
+           p_age_blvrb, width = 8, height = 6, dpi = 300)
+
+    cat("    - Figure 11 saved\n")
+  }
+
+  # ------------------------------------------------------------------------------
+  # Step 9.3: Survival by Age Group
+  # ------------------------------------------------------------------------------
+
+  if (all(c("RFS_MONTHS", "RFS_STATUS", "BLVRB_EXPRESSION_GROUP") %in% colnames(merged_data))) {
+
+    cat("\n  Analyzing survival by age groups...\n")
+
+    # Create separate survival curves for each age group
+    for (age_grp in levels(merged_data$AGE_GROUP)) {
+
+      age_surv_data <- merged_data %>%
+        dplyr::filter(AGE_GROUP == age_grp,
+               !is.na(RFS_MONTHS), !is.na(RFS_STATUS), !is.na(BLVRB_EXPRESSION_GROUP))
+
+      if (nrow(age_surv_data) > 30) {
+
+        cat(sprintf("\n    Age group: %s (n=%d)\n", age_grp, nrow(age_surv_data)))
+
+        surv_obj_age <- Surv(time = age_surv_data$RFS_MONTHS,
+                            event = age_surv_data$RFS_STATUS)
+
+        fit_age <- survfit(surv_obj_age ~ BLVRB_EXPRESSION_GROUP, data = age_surv_data)
+
+        survdiff_age <- survdiff(surv_obj_age ~ BLVRB_EXPRESSION_GROUP,
+                                data = age_surv_data)
+        logrank_p_age <- 1 - pchisq(survdiff_age$chisq,
+                                   length(survdiff_age$n) - 1)
+
+        cox_age <- coxph(surv_obj_age ~ BLVRB_EXPRESSION_GROUP, data = age_surv_data)
+        cox_summary_age <- summary(cox_age)
+
+        hr_age <- cox_summary_age$conf.int[1]
+        hr_lower_age <- cox_summary_age$conf.int[3]
+        hr_upper_age <- cox_summary_age$conf.int[4]
+        cox_p_age <- cox_summary_age$coefficients[5]
+
+        cat(sprintf("      - HR: %.2f (%.2f-%.2f), p=%.4f\n",
+                    hr_age, hr_lower_age, hr_upper_age, cox_p_age))
+
+        # Create plot
+        age_label <- gsub(" ", "_", gsub("[<>]", "", age_grp))
+
+        p_km_age <- ggsurvplot(
+          fit_age,
+          data = age_surv_data,
+          pval = TRUE,
+          conf.int = TRUE,
+          risk.table = TRUE,
+          risk.table.height = 0.25,
+          palette = c("blue", "red"),
+          legend.labs = c("BLVRB-low", "BLVRB-high"),
+          title = sprintf("RFS: %s", age_grp),
+          xlab = "Time (months)",
+          ylab = "Relapse-Free Survival",
+          ggtheme = theme_bw(base_size = 12),
+          legend.title = "BLVRB Status"
+        )
+
+        ggsave(file.path(output_dir, "figures",
+                        sprintf("Figure12_%s_Age_Survival.png", age_label)),
+               print(p_km_age),
+               width = 9, height = 7, dpi = 300)
+      }
+    }
+
+    cat("\n    - Age-stratified survival curves saved\n")
+  }
+}
+
+# ==============================================================================
+# PHASE 10: SUBTYPE-SPECIFIC COMPREHENSIVE ANALYSIS
+# ==============================================================================
+
+cat("\n====================================\n")
+cat("PHASE 10: Subtype-Specific Analysis\n")
+cat("====================================\n\n")
+
+if ("SUBTYPE_SIMPLE" %in% colnames(merged_data)) {
+
+  # ------------------------------------------------------------------------------
+  # Step 10.1: Subtype Distribution and Characteristics
+  # ------------------------------------------------------------------------------
+
+  cat("  Analyzing molecular subtypes...\n")
+
+  subtype_data <- merged_data %>%
+    dplyr::filter(!is.na(SUBTYPE_SIMPLE))
+
+  subtype_dist <- as.data.frame(table(subtype_data$SUBTYPE_SIMPLE))
+  colnames(subtype_dist) <- c("Subtype", "N")
+  subtype_dist$Percent <- 100 * subtype_dist$N / sum(subtype_dist$N)
+
+  cat("    - Subtype distribution:\n")
+  print(subtype_dist)
+
+  write.csv(subtype_dist,
+            file.path(output_dir, "tables", "Table9_Subtype_Distribution.csv"),
+            row.names = FALSE)
+
+  # ------------------------------------------------------------------------------
+  # Step 10.2: BLVRB Expression Across Subtypes (Enhanced)
+  # ------------------------------------------------------------------------------
+
+  cat("\n  Creating enhanced subtype visualizations...\n")
+
+  subtype_blvrb_data <- merged_data %>%
+    dplyr::filter(!is.na(SUBTYPE_SIMPLE), !is.na(BLVRB_EXPRESSION))
+
+  if (nrow(subtype_blvrb_data) > 0) {
+
+    # Figure 13: Violin plot by subtype
+    p_violin_subtype <- ggplot(subtype_blvrb_data,
+                               aes(x = SUBTYPE_SIMPLE, y = BLVRB_EXPRESSION,
+                                   fill = SUBTYPE_SIMPLE)) +
+      geom_violin(alpha = 0.7, trim = FALSE) +
+      geom_boxplot(width = 0.1, fill = "white", outlier.shape = NA) +
+      geom_jitter(width = 0.1, alpha = 0.2, size = 0.3) +
+      scale_fill_brewer(palette = "Set2") +
+      labs(title = "BLVRB Expression Distribution by Molecular Subtype",
+           x = "Molecular Subtype",
+           y = "BLVRB Expression (log2)") +
+      theme_bw(base_size = 12) +
+      theme(legend.position = "none",
+            axis.text.x = element_text(angle = 45, hjust = 1)) +
+      stat_summary(fun = median, geom = "point", shape = 23, size = 3,
+                  fill = "red", color = "black")
+
+    ggsave(file.path(output_dir, "figures", "Figure13_BLVRB_Violin_Subtype.png"),
+           p_violin_subtype, width = 10, height = 7, dpi = 300)
+
+    cat("    - Figure 13 saved\n")
+
+    # Summary statistics by subtype
+    subtype_summary <- subtype_blvrb_data %>%
+      group_by(SUBTYPE_SIMPLE) %>%
+      summarise(
+        N = n(),
+        Mean_BLVRB = mean(BLVRB_EXPRESSION, na.rm = TRUE),
+        Median_BLVRB = median(BLVRB_EXPRESSION, na.rm = TRUE),
+        SD_BLVRB = sd(BLVRB_EXPRESSION, na.rm = TRUE),
+        Q1_BLVRB = quantile(BLVRB_EXPRESSION, 0.25, na.rm = TRUE),
+        Q3_BLVRB = quantile(BLVRB_EXPRESSION, 0.75, na.rm = TRUE)
+      )
+
+    write.csv(subtype_summary,
+              file.path(output_dir, "tables", "Table10_BLVRB_by_Subtype_Summary.csv"),
+              row.names = FALSE)
+  }
+
+  # ------------------------------------------------------------------------------
+  # Step 10.3: Survival Analysis for Each Subtype
+  # ------------------------------------------------------------------------------
+
+  if (all(c("RFS_MONTHS", "RFS_STATUS", "BLVRB_EXPRESSION_GROUP") %in% colnames(merged_data))) {
+
+    cat("\n  Performing survival analysis for each subtype...\n")
+
+    subtype_survival_results <- list()
+
+    for (subtype in unique(subtype_data$SUBTYPE_SIMPLE)) {
+
+      if (is.na(subtype)) next
+
+      subtype_surv_data <- merged_data %>%
+        dplyr::filter(SUBTYPE_SIMPLE == subtype,
+               !is.na(RFS_MONTHS), !is.na(RFS_STATUS), !is.na(BLVRB_EXPRESSION_GROUP))
+
+      if (nrow(subtype_surv_data) > 30) {
+
+        cat(sprintf("\n    Subtype: %s (n=%d)\n", subtype, nrow(subtype_surv_data)))
+
+        surv_obj_subtype <- Surv(time = subtype_surv_data$RFS_MONTHS,
+                                event = subtype_surv_data$RFS_STATUS)
+
+        fit_subtype <- survfit(surv_obj_subtype ~ BLVRB_EXPRESSION_GROUP,
+                              data = subtype_surv_data)
+
+        survdiff_subtype <- survdiff(surv_obj_subtype ~ BLVRB_EXPRESSION_GROUP,
+                                    data = subtype_surv_data)
+        logrank_p_subtype <- 1 - pchisq(survdiff_subtype$chisq,
+                                       length(survdiff_subtype$n) - 1)
+
+        cox_subtype <- coxph(surv_obj_subtype ~ BLVRB_EXPRESSION_GROUP,
+                            data = subtype_surv_data)
+        cox_summary_subtype <- summary(cox_subtype)
+
+        hr_subtype <- cox_summary_subtype$conf.int[1]
+        hr_lower_subtype <- cox_summary_subtype$conf.int[3]
+        hr_upper_subtype <- cox_summary_subtype$conf.int[4]
+        cox_p_subtype <- cox_summary_subtype$coefficients[5]
+
+        cat(sprintf("      - HR: %.2f (%.2f-%.2f), p=%.4f\n",
+                    hr_subtype, hr_lower_subtype, hr_upper_subtype, cox_p_subtype))
+
+        # Store results
+        subtype_survival_results[[subtype]] <- data.frame(
+          Subtype = subtype,
+          N = nrow(subtype_surv_data),
+          Events = sum(subtype_surv_data$RFS_STATUS),
+          HR = hr_subtype,
+          HR_lower = hr_lower_subtype,
+          HR_upper = hr_upper_subtype,
+          Cox_p = cox_p_subtype,
+          Logrank_p = logrank_p_subtype
+        )
+
+        # Create KM plot for each subtype
+        subtype_label <- gsub("[/ ]", "_", subtype)
+
+        p_km_subtype <- ggsurvplot(
+          fit_subtype,
+          data = subtype_surv_data,
+          pval = TRUE,
+          conf.int = TRUE,
+          risk.table = TRUE,
+          risk.table.height = 0.25,
+          palette = c("blue", "red"),
+          legend.labs = c("BLVRB-low", "BLVRB-high"),
+          title = sprintf("RFS: %s Subtype", subtype),
+          xlab = "Time (months)",
+          ylab = "Relapse-Free Survival",
+          ggtheme = theme_bw(base_size = 12),
+          legend.title = "BLVRB Status"
+        )
+
+        p_km_subtype$plot <- p_km_subtype$plot +
+          annotate("text", x = max(subtype_surv_data$RFS_MONTHS, na.rm = TRUE) * 0.7,
+                   y = 0.2,
+                   label = sprintf("HR = %.2f (%.2f-%.2f)\np = %.4f",
+                                 hr_subtype, hr_lower_subtype, hr_upper_subtype,
+                                 cox_p_subtype),
+                   size = 4, hjust = 0)
+
+        ggsave(file.path(output_dir, "figures",
+                        sprintf("Figure14_%s_Subtype_Survival.png", subtype_label)),
+               print(p_km_subtype),
+               width = 10, height = 8, dpi = 300)
+      }
+    }
+
+    # Combine and save subtype survival results
+    if (length(subtype_survival_results) > 0) {
+      subtype_survival_table <- do.call(rbind, subtype_survival_results)
+
+      write.csv(subtype_survival_table,
+                file.path(output_dir, "tables", "Table11_Subtype_Survival_Results.csv"),
+                row.names = FALSE)
+
+      cat("\n    - Subtype survival analyses complete\n")
+      cat("    - Table 11 saved\n")
+    }
+  }
+
+  # ------------------------------------------------------------------------------
+  # Step 10.4: Treatment Response by Subtype
+  # ------------------------------------------------------------------------------
+
+  if (all(c("CHEMOTHERAPY", "RFS_MONTHS", "RFS_STATUS") %in% colnames(merged_data))) {
+
+    cat("\n  Analyzing chemotherapy response by subtype...\n")
+
+    subtype_chemo_results <- list()
+
+    for (subtype in unique(subtype_data$SUBTYPE_SIMPLE)) {
+
+      if (is.na(subtype)) next
+
+      subtype_chemo_data <- merged_data %>%
+        dplyr::filter(SUBTYPE_SIMPLE == subtype,
+               CHEMOTHERAPY == "YES",
+               !is.na(RFS_MONTHS), !is.na(RFS_STATUS), !is.na(BLVRB_EXPRESSION_GROUP))
+
+      if (nrow(subtype_chemo_data) > 20) {
+
+        cat(sprintf("    - %s: %d chemo-treated patients\n",
+                    subtype, nrow(subtype_chemo_data)))
+
+        surv_obj_sub_chemo <- Surv(time = subtype_chemo_data$RFS_MONTHS,
+                                   event = subtype_chemo_data$RFS_STATUS)
+
+        cox_sub_chemo <- coxph(surv_obj_sub_chemo ~ BLVRB_EXPRESSION_GROUP,
+                              data = subtype_chemo_data)
+        cox_summary_sub_chemo <- summary(cox_sub_chemo)
+
+        subtype_chemo_results[[subtype]] <- data.frame(
+          Subtype = subtype,
+          N_Chemo_Treated = nrow(subtype_chemo_data),
+          Events = sum(subtype_chemo_data$RFS_STATUS),
+          HR = cox_summary_sub_chemo$conf.int[1],
+          HR_lower = cox_summary_sub_chemo$conf.int[3],
+          HR_upper = cox_summary_sub_chemo$conf.int[4],
+          p_value = cox_summary_sub_chemo$coefficients[5]
+        )
+      }
+    }
+
+    if (length(subtype_chemo_results) > 0) {
+      subtype_chemo_table <- do.call(rbind, subtype_chemo_results)
+
+      write.csv(subtype_chemo_table,
+                file.path(output_dir, "tables", "Table12_Subtype_Chemo_Response.csv"),
+                row.names = FALSE)
+
+      cat("    - Table 12 saved\n")
+    }
+  }
+}
+
+# ==============================================================================
+# PHASE 11: FOREST PLOTS AND SUMMARY VISUALIZATIONS
+# ==============================================================================
+
+cat("\n====================================\n")
+cat("PHASE 11: Forest Plots & Summary Figures\n")
+cat("====================================\n\n")
+
+# ------------------------------------------------------------------------------
+# Step 11.1: Forest Plot of Hazard Ratios
+# ------------------------------------------------------------------------------
+
+cat("  Creating forest plot of hazard ratios...\n")
+
+# Collect all HR results
+forest_data_list <- list()
+
+# Overall cohort
+if (exists("merged_data") && all(c("RFS_MONTHS", "RFS_STATUS", "BLVRB_EXPRESSION_GROUP") %in% colnames(merged_data))) {
+  overall_surv_data <- merged_data %>%
+    dplyr::filter(!is.na(RFS_MONTHS), !is.na(RFS_STATUS), !is.na(BLVRB_EXPRESSION_GROUP))
+
+  if (nrow(overall_surv_data) > 0) {
+    surv_overall <- Surv(time = overall_surv_data$RFS_MONTHS,
+                        event = overall_surv_data$RFS_STATUS)
+    cox_overall <- coxph(surv_overall ~ BLVRB_EXPRESSION_GROUP, data = overall_surv_data)
+    cox_sum_overall <- summary(cox_overall)
+
+    forest_data_list[["Overall Cohort"]] <- data.frame(
+      Group = "Overall Cohort",
+      N = nrow(overall_surv_data),
+      HR = cox_sum_overall$conf.int[1],
+      Lower = cox_sum_overall$conf.int[3],
+      Upper = cox_sum_overall$conf.int[4],
+      P_value = cox_sum_overall$coefficients[5]
+    )
+  }
+}
+
+# Add chemotherapy treated
+if (exists("chemo_treated_results")) {
+  forest_data_list[["Chemo Treated"]] <- data.frame(
+    Group = "Chemotherapy Treated",
+    N = chemo_treated_results$N,
+    HR = chemo_treated_results$HR,
+    Lower = chemo_treated_results$HR_lower,
+    Upper = chemo_treated_results$HR_upper,
+    P_value = chemo_treated_results$Cox_p
+  )
+}
+
+# Add chemotherapy untreated
+if (exists("chemo_untreated_results")) {
+  forest_data_list[["Chemo Untreated"]] <- data.frame(
+    Group = "Chemotherapy Untreated",
+    N = chemo_untreated_results$N,
+    HR = chemo_untreated_results$HR,
+    Lower = chemo_untreated_results$HR_lower,
+    Upper = chemo_untreated_results$HR_upper,
+    P_value = chemo_untreated_results$Cox_p
+  )
+}
+
+# Add hormone therapy treated
+if (exists("hormone_treated_results")) {
+  forest_data_list[["Hormone Treated"]] <- data.frame(
+    Group = "Hormone Therapy Treated",
+    N = hormone_treated_results$N,
+    HR = hormone_treated_results$HR,
+    Lower = hormone_treated_results$HR_lower,
+    Upper = hormone_treated_results$HR_upper,
+    P_value = hormone_treated_results$Cox_p
+  )
+}
+
+# Add subtypes
+if (exists("subtype_survival_results") && length(subtype_survival_results) > 0) {
+  for (subtype_name in names(subtype_survival_results)) {
+    subtype_res <- subtype_survival_results[[subtype_name]]
+    forest_data_list[[subtype_name]] <- data.frame(
+      Group = subtype_name,
+      N = subtype_res$N,
+      HR = subtype_res$HR,
+      Lower = subtype_res$HR_lower,
+      Upper = subtype_res$HR_upper,
+      P_value = subtype_res$Cox_p
+    )
+  }
+}
+
+# Create forest plot
+if (length(forest_data_list) > 0) {
+
+  forest_data <- do.call(rbind, forest_data_list)
+  forest_data$Group <- factor(forest_data$Group, levels = rev(forest_data$Group))
+  forest_data$Significant <- ifelse(forest_data$P_value < 0.05, "Yes", "No")
+
+  # Figure 15: Forest plot
+  p_forest <- ggplot(forest_data, aes(x = HR, y = Group)) +
+    geom_vline(xintercept = 1, linetype = "dashed", color = "gray50", size = 0.8) +
+    geom_errorbarh(aes(xmin = Lower, xmax = Upper, color = Significant),
+                  height = 0.3, size = 1) +
+    geom_point(aes(color = Significant, size = N), shape = 18) +
+    scale_color_manual(values = c("Yes" = "red", "No" = "gray50")) +
+    scale_size_continuous(range = c(3, 8)) +
+    scale_x_log10() +
+    labs(title = "Forest Plot: BLVRB-high vs BLVRB-low Hazard Ratios",
+         subtitle = "Relapse-Free Survival Across Subgroups",
+         x = "Hazard Ratio (95% CI)",
+         y = "") +
+    theme_bw(base_size = 12) +
+    theme(legend.position = "bottom",
+          panel.grid.major.y = element_line(color = "gray90"),
+          panel.grid.minor = element_blank()) +
+    geom_text(aes(label = sprintf("%.2f (%.2f-%.2f)", HR, Lower, Upper)),
+             hjust = -0.2, size = 3)
+
+  ggsave(file.path(output_dir, "figures", "Figure15_Forest_Plot_All_Groups.png"),
+         p_forest, width = 12, height = 8, dpi = 300)
+
+  cat("    - Figure 15 (Forest plot) saved\n")
+
+  # Save forest data
+  write.csv(forest_data,
+            file.path(output_dir, "tables", "Table13_Forest_Plot_Data.csv"),
+            row.names = FALSE)
+}
+
+# ------------------------------------------------------------------------------
+# Step 11.2: Summary Heatmap of Clinical Characteristics
+# ------------------------------------------------------------------------------
+
+cat("\n  Creating summary heatmap...\n")
+
+if (all(c("BLVRB_EXPRESSION_GROUP", "SUBTYPE_SIMPLE", "GRADE",
+          "ER_STATUS", "HER2_STATUS", "CHEMOTHERAPY") %in% colnames(merged_data))) {
+
+  # Create summary table for heatmap
+  heatmap_data <- merged_data %>%
+    dplyr::filter(!is.na(BLVRB_EXPRESSION_GROUP)) %>%
+    group_by(BLVRB_EXPRESSION_GROUP) %>%
+    summarise(
+      Mean_Age = mean(AGE_AT_DIAGNOSIS, na.rm = TRUE),
+      Mean_Tumor_Size = mean(TUMOR_SIZE, na.rm = TRUE),
+      Mean_Lymph_Nodes = mean(LYMPH_NODES_EXAMINED_POSITIVE, na.rm = TRUE),
+      Pct_ER_Pos = 100 * mean(ER_STATUS == "Positive", na.rm = TRUE),
+      Pct_HER2_Pos = 100 * mean(HER2_STATUS == "Positive", na.rm = TRUE),
+      Pct_Grade3 = 100 * mean(GRADE == 3, na.rm = TRUE),
+      Pct_Chemo = 100 * mean(CHEMOTHERAPY == "YES", na.rm = TRUE),
+      Pct_Relapsed = 100 * mean(RFS_STATUS == 1, na.rm = TRUE)
+    )
+
+  # Transpose for heatmap
+  heatmap_matrix <- as.matrix(t(heatmap_data[, -1]))
+  colnames(heatmap_matrix) <- heatmap_data$BLVRB_EXPRESSION_GROUP
+
+  # Figure 16: Heatmap
+  png(file.path(output_dir, "figures", "Figure16_Clinical_Characteristics_Heatmap.png"),
+      width = 8, height = 10, units = "in", res = 300)
+
+  pheatmap(heatmap_matrix,
+           cluster_rows = FALSE,
+           cluster_cols = FALSE,
+           display_numbers = TRUE,
+           number_format = "%.1f",
+           color = colorRampPalette(c("blue", "white", "red"))(50),
+           main = "Clinical Characteristics by BLVRB Expression",
+           fontsize = 11,
+           cellwidth = 80,
+           cellheight = 30)
+
+  dev.off()
+
+  cat("    - Figure 16 (Heatmap) saved\n")
+}
+
+# ------------------------------------------------------------------------------
+# Step 11.3: Treatment Benefit Plot
+# ------------------------------------------------------------------------------
+
+cat("\n  Creating treatment benefit visualization...\n")
+
+if (all(c("CHEMOTHERAPY", "BLVRB_EXPRESSION_GROUP", "RFS_STATUS") %in% colnames(merged_data))) {
+
+  treatment_benefit <- merged_data %>%
+    dplyr::filter(CHEMOTHERAPY %in% c("YES", "NO"),
+           !is.na(BLVRB_EXPRESSION_GROUP),
+           !is.na(RFS_STATUS)) %>%
+    group_by(BLVRB_EXPRESSION_GROUP, CHEMOTHERAPY) %>%
+    summarise(
+      N = n(),
+      Events = sum(RFS_STATUS == 1, na.rm = TRUE),
+      Event_Rate = 100 * mean(RFS_STATUS == 1, na.rm = TRUE),
+      .groups = "drop"
+    )
+
+  # Figure 17: Treatment benefit bar plot
+  p_treatment_benefit <- ggplot(treatment_benefit,
+                                aes(x = BLVRB_EXPRESSION_GROUP,
+                                    y = Event_Rate,
+                                    fill = CHEMOTHERAPY)) +
+    geom_bar(stat = "identity", position = "dodge", alpha = 0.8) +
+    geom_text(aes(label = sprintf("%.1f%%\n(n=%d)", Event_Rate, N)),
+             position = position_dodge(width = 0.9),
+             vjust = -0.3, size = 3.5) +
+    scale_fill_manual(values = c("YES" = "darkred", "NO" = "steelblue"),
+                     labels = c("YES" = "Chemotherapy", "NO" = "No Chemotherapy")) +
+    labs(title = "Relapse Rates by BLVRB Expression and Chemotherapy",
+         x = "BLVRB Expression Group",
+         y = "Relapse Rate (%)",
+         fill = "Treatment") +
+    theme_bw(base_size = 12) +
+    theme(legend.position = "top")
+
+  ggsave(file.path(output_dir, "figures", "Figure17_Treatment_Benefit_Plot.png"),
+         p_treatment_benefit, width = 10, height = 7, dpi = 300)
+
+  cat("    - Figure 17 (Treatment benefit) saved\n")
+}
+
+# ==============================================================================
 # FINAL SUMMARY
 # ==============================================================================
 

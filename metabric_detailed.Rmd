@@ -1,0 +1,1797 @@
+---
+title: "metabric_detailed"
+author: "Parth Pidadi"
+date: "2025-12-18"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+################################################################################
+# BLVRB THERAPY RESISTANCE ANALYSIS - METABRIC DATASET
+# Complete Analysis Script
+# Date: December 2024
+# Dataset: METABRIC (n=2,509 breast cancer patients)
+################################################################################
+
+# ==============================================================================
+# SETUP AND CONFIGURATION
+# ==============================================================================
+
+# Clear environment
+rm(list = ls())
+
+# Set working directory
+setwd("D:/SUNY RF Research/TCGA_BRCA_updated")
+
+# Create output directory
+output_dir <- "D:/SUNY RF Research/TCGA_BRCA_updated/BLVRB_Analysis_Results"
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir, recursive = TRUE)
+}
+
+# Create subdirectories for organized outputs
+dir.create(file.path(output_dir, "figures"), showWarnings = FALSE)
+dir.create(file.path(output_dir, "tables"), showWarnings = FALSE)
+dir.create(file.path(output_dir, "data"), showWarnings = FALSE)
+
+# Load required libraries
+required_packages <- c(
+  "tidyverse", "survival", "survminer", "pROC", "ggplot2", 
+  "gridExtra", "pheatmap", "RColorBrewer", "limma", "clusterProfiler",
+  "org.Hs.eg.db", "enrichplot", "ggrepel", "cowplot", "broom"
+)
+
+# Install missing packages
+for (pkg in required_packages) {
+  if (!require(pkg, character.only = TRUE)) {
+    if (pkg %in% c("clusterProfiler", "org.Hs.eg.db", "enrichplot")) {
+      if (!requireNamespace("BiocManager", quietly = TRUE)) {
+        install.packages("BiocManager")
+      }
+      BiocManager::install(pkg)
+    } else {
+      install.packages(pkg)
+    }
+    library(pkg, character.only = TRUE)
+  }
+}
+
+# Explicitly load dplyr to avoid conflicts
+library(dplyr)
+
+# Set plotting parameters
+theme_set(theme_bw())
+options(scipen = 999)  # Avoid scientific notation
+
+cat("====================================\n")
+cat("BLVRB THERAPY RESISTANCE ANALYSIS\n")
+cat("====================================\n\n")
+
+# ==============================================================================
+# PHASE 1: DATA PREPARATION & MERGING
+# ==============================================================================
+
+cat("PHASE 1: Loading and merging data...\n")
+
+# Define data directory
+data_dir <- "D:/SUNY RF Research/TCGA_BRCA_updated/data/brca_metabric"
+
+# ------------------------------------------------------------------------------
+# Step 1.1: Load Clinical Files (ROWS = PATIENTS)
+# ------------------------------------------------------------------------------
+
+cat("  Loading clinical patient data...\n")
+# Try to read with different separators
+clinical_patient <- tryCatch({
+  read.csv(
+    file.path(data_dir, "data_clinical_patient.csv"),
+    stringsAsFactors = FALSE,
+    comment.char = "#",
+    sep = ","
+  )
+}, error = function(e) {
+  # If comma fails, try tab
+  read.delim(
+    file.path(data_dir, "data_clinical_patient.csv"),
+    stringsAsFactors = FALSE,
+    comment.char = "#",
+    sep = "\t"
+  )
+})
+
+cat("  Loading clinical sample data...\n")
+clinical_sample <- tryCatch({
+  read.csv(
+    file.path(data_dir, "data_clinical_sample.csv"),
+    stringsAsFactors = FALSE,
+    comment.char = "#",
+    sep = ","
+  )
+}, error = function(e) {
+  read.delim(
+    file.path(data_dir, "data_clinical_sample.csv"),
+    stringsAsFactors = FALSE,
+    comment.char = "#",
+    sep = "\t"
+  )
+})
+
+cat(sprintf("    - Patient data: %d rows\n", nrow(clinical_patient)))
+cat(sprintf("    - Sample data: %d rows\n", nrow(clinical_sample)))
+
+# ------------------------------------------------------------------------------
+# Step 1.2: Extract BLVRB Expression Data (ROWS = GENES)
+# ------------------------------------------------------------------------------
+
+cat("  Loading expression data and extracting BLVRB...\n")
+cat("    (This may take a few minutes for large file)\n")
+
+# Read expression file with flexible separator
+expression_data <- tryCatch({
+  read.csv(
+    file.path(data_dir, "data_mrna_illumina_microarray.csv"),
+    stringsAsFactors = FALSE,
+    comment.char = "#",
+    check.names = FALSE,
+    sep = ","
+  )
+}, error = function(e) {
+  cat("    Comma separator failed, trying tab separator...\n")
+  read.delim(
+    file.path(data_dir, "data_mrna_illumina_microarray.csv"),
+    stringsAsFactors = FALSE,
+    comment.char = "#",
+    check.names = FALSE,
+    sep = "\t"
+  )
+})
+
+cat(sprintf("    - Expression matrix: %d genes x %d samples\n", 
+            nrow(expression_data), ncol(expression_data) - 2))
+
+# Find BLVRB row - check multiple possible column names
+gene_col_names <- c("Hugo_Symbol", "Gene", colnames(expression_data)[1])
+blvrb_row_idx <- NULL
+
+for (col_name in gene_col_names) {
+  if (col_name %in% colnames(expression_data)) {
+    blvrb_row_idx <- which(expression_data[[col_name]] == "BLVRB")
+    if (length(blvrb_row_idx) > 0) {
+      cat(sprintf("    - Found BLVRB in column: %s\n", col_name))
+      break
+    }
+  }
+}
+
+# If not found by column name, search first column directly
+if (is.null(blvrb_row_idx) || length(blvrb_row_idx) == 0) {
+  blvrb_row_idx <- which(expression_data[, 1] == "BLVRB")
+}
+
+if (length(blvrb_row_idx) == 0) {
+  stop("ERROR: BLVRB gene not found in expression data! Please check the gene name column.")
+}
+
+cat(sprintf("    - BLVRB found at row: %d\n", blvrb_row_idx))
+
+# Extract BLVRB expression values
+blvrb_expression <- expression_data[blvrb_row_idx, ]
+
+# Determine which columns contain patient data (not gene identifiers)
+# Typically columns 1-2 are Hugo_Symbol and Entrez_Gene_Id
+# Find where patient IDs start (they usually start with specific patterns)
+first_cols <- colnames(expression_data)[1:min(5, ncol(expression_data))]
+cat(sprintf("    - First few columns: %s\n", paste(first_cols, collapse = ", ")))
+
+# Find the first column that looks like a patient ID (starts with MB-, TCGA-, etc.)
+patient_start_col <- 3  # Default assumption
+for (i in 1:min(5, ncol(expression_data))) {
+  if (any(grepl("^MB-|^TCGA-|^SAM", colnames(expression_data)[i]))) {
+    patient_start_col <- i
+    cat(sprintf("    - Patient IDs start at column: %d\n", patient_start_col))
+    break
+  }
+}
+
+# Get patient IDs (column names starting from patient_start_col)
+patient_cols <- colnames(expression_data)[patient_start_col:ncol(expression_data)]
+
+# Create BLVRB expression data frame
+blvrb_expr_df <- data.frame(
+  PATIENT_ID = patient_cols,
+  BLVRB_EXPRESSION = as.numeric(blvrb_expression[patient_start_col:length(blvrb_expression)]),
+  stringsAsFactors = FALSE
+)
+
+cat(sprintf("    - BLVRB expression extracted: %d patients\n", nrow(blvrb_expr_df)))
+cat(sprintf("    - Expression range: %.2f to %.2f\n", 
+            min(blvrb_expr_df$BLVRB_EXPRESSION, na.rm = TRUE),
+            max(blvrb_expr_df$BLVRB_EXPRESSION, na.rm = TRUE)))
+
+# ------------------------------------------------------------------------------
+# Step 1.3: Extract BLVRB Copy Number Data (ROWS = GENES)
+# ------------------------------------------------------------------------------
+
+cat("  Loading CNA data and extracting BLVRB...\n")
+
+# Read CNA file with flexible separator
+cna_data <- tryCatch({
+  read.csv(
+    file.path(data_dir, "data_cna.csv"),
+    stringsAsFactors = FALSE,
+    comment.char = "#",
+    check.names = FALSE,
+    sep = ","
+  )
+}, error = function(e) {
+  cat("    Comma separator failed, trying tab separator...\n")
+  read.delim(
+    file.path(data_dir, "data_cna.csv"),
+    stringsAsFactors = FALSE,
+    comment.char = "#",
+    check.names = FALSE,
+    sep = "\t"
+  )
+})
+
+cat(sprintf("    - CNA matrix: %d genes x %d samples\n", 
+            nrow(cna_data), ncol(cna_data) - 2))
+
+# Find BLVRB row - check multiple possible column names
+blvrb_cna_row_idx <- NULL
+
+for (col_name in gene_col_names) {
+  if (col_name %in% colnames(cna_data)) {
+    blvrb_cna_row_idx <- which(cna_data[[col_name]] == "BLVRB")
+    if (length(blvrb_cna_row_idx) > 0) {
+      cat(sprintf("    - Found BLVRB in column: %s\n", col_name))
+      break
+    }
+  }
+}
+
+# If not found by column name, search first column directly
+if (is.null(blvrb_cna_row_idx) || length(blvrb_cna_row_idx) == 0) {
+  blvrb_cna_row_idx <- which(cna_data[, 1] == "BLVRB")
+}
+
+if (length(blvrb_cna_row_idx) == 0) {
+  stop("ERROR: BLVRB gene not found in CNA data! Please check the gene name column.")
+}
+
+cat(sprintf("    - BLVRB found at row: %d\n", blvrb_cna_row_idx))
+
+# Extract BLVRB CNA values
+blvrb_cna <- cna_data[blvrb_cna_row_idx, ]
+
+# Use the same patient_start_col as expression data, or detect again
+if (!exists("patient_start_col")) {
+  patient_start_col <- 3
+  for (i in 1:min(5, ncol(cna_data))) {
+    if (any(grepl("^MB-|^TCGA-|^SAM", colnames(cna_data)[i]))) {
+      patient_start_col <- i
+      break
+    }
+  }
+}
+
+# Get patient IDs (should match expression data)
+patient_cols_cna <- colnames(cna_data)[patient_start_col:ncol(cna_data)]
+
+# Create BLVRB CNA data frame
+blvrb_cna_df <- data.frame(
+  PATIENT_ID = patient_cols_cna,
+  BLVRB_CNA = as.numeric(blvrb_cna[patient_start_col:length(blvrb_cna)]),
+  stringsAsFactors = FALSE
+)
+
+cat(sprintf("    - BLVRB CNA extracted: %d patients\n", nrow(blvrb_cna_df)))
+
+# Check CNA distribution
+cna_table <- table(blvrb_cna_df$BLVRB_CNA, useNA = "always")
+cat("    - CNA distribution:\n")
+print(cna_table)
+
+# ------------------------------------------------------------------------------
+# Step 1.4: Merge All Datasets
+# ------------------------------------------------------------------------------
+
+cat("\n  Merging all datasets...\n")
+
+# Start with patient clinical data
+merged_data <- clinical_patient
+
+# Merge with sample clinical data
+merged_data <- merge(
+  merged_data,
+  clinical_sample,
+  by = "PATIENT_ID",
+  all.x = TRUE,
+  suffixes = c("", "_sample")
+)
+
+cat(sprintf("    - After merging sample data: %d rows\n", nrow(merged_data)))
+
+# Merge with BLVRB expression
+merged_data <- merge(
+  merged_data,
+  blvrb_expr_df,
+  by = "PATIENT_ID",
+  all.x = TRUE
+)
+
+cat(sprintf("    - After merging BLVRB expression: %d rows\n", nrow(merged_data)))
+
+# Merge with BLVRB CNA
+merged_data <- merge(
+  merged_data,
+  blvrb_cna_df,
+  by = "PATIENT_ID",
+  all.x = TRUE
+)
+
+cat(sprintf("    - Final merged dataset: %d rows, %d columns\n", 
+            nrow(merged_data), ncol(merged_data)))
+
+# ------------------------------------------------------------------------------
+# Step 1.5: Create Derived Variables
+# ------------------------------------------------------------------------------
+
+cat("\n  Creating derived variables...\n")
+
+# BLVRB Expression Groups - Median Split
+median_blvrb <- median(merged_data$BLVRB_EXPRESSION, na.rm = TRUE)
+cat(sprintf("    - BLVRB median: %.3f\n", median_blvrb))
+
+merged_data$BLVRB_EXPRESSION_GROUP <- ifelse(
+  merged_data$BLVRB_EXPRESSION >= median_blvrb,
+  "BLVRB-high",
+  "BLVRB-low"
+)
+
+# BLVRB Expression Groups - Quartile Split
+q1_blvrb <- quantile(merged_data$BLVRB_EXPRESSION, 0.25, na.rm = TRUE)
+q3_blvrb <- quantile(merged_data$BLVRB_EXPRESSION, 0.75, na.rm = TRUE)
+
+# Check if Q1 and Q3 are different (avoid cut() error)
+if (!is.na(q1_blvrb) && !is.na(q3_blvrb) && q1_blvrb < q3_blvrb) {
+  merged_data$BLVRB_QUARTILE_GROUP <- cut(
+    merged_data$BLVRB_EXPRESSION,
+    breaks = c(-Inf, q1_blvrb, q3_blvrb, Inf),
+    labels = c("BLVRB-very-low", "BLVRB-intermediate", "BLVRB-very-high"),
+    include.lowest = TRUE
+  )
+} else {
+  # If Q1 and Q3 are the same, use median split instead
+  cat("    WARNING: Q1 and Q3 are too similar, using median split for quartiles\n")
+  merged_data$BLVRB_QUARTILE_GROUP <- merged_data$BLVRB_EXPRESSION_GROUP
+}
+
+# BLVRB CNA Groups
+merged_data$BLVRB_CNA_GROUP <- ifelse(
+  merged_data$BLVRB_CNA %in% c(-2, -1), "Deleted",
+  ifelse(merged_data$BLVRB_CNA == 0, "Neutral",
+         ifelse(merged_data$BLVRB_CNA %in% c(1, 2), "Amplified", NA))
+)
+
+# Simplified Subtype Variable
+merged_data$SUBTYPE_SIMPLE <- NA
+
+# Try using CLAUDIN_SUBTYPE first
+if ("CLAUDIN_SUBTYPE" %in% colnames(merged_data)) {
+  merged_data$SUBTYPE_SIMPLE <- ifelse(
+    merged_data$CLAUDIN_SUBTYPE == "Her2", "HER2+",
+    ifelse(merged_data$CLAUDIN_SUBTYPE == "LumA", "Luminal A",
+           ifelse(merged_data$CLAUDIN_SUBTYPE == "LumB", "Luminal B",
+                  ifelse(merged_data$CLAUDIN_SUBTYPE %in% c("Basal", "claudin-low"), 
+                         "Basal/Triple-negative", NA)))
+  )
+}
+
+# If CLAUDIN_SUBTYPE not available, use ER/HER2/GRADE
+if (all(is.na(merged_data$SUBTYPE_SIMPLE)) && 
+    all(c("ER_STATUS", "HER2_STATUS", "GRADE") %in% colnames(merged_data))) {
+  
+  merged_data$SUBTYPE_SIMPLE <- ifelse(
+    merged_data$HER2_STATUS == "Positive", "HER2+",
+    ifelse(merged_data$ER_STATUS == "Positive" & merged_data$GRADE %in% c(1, 2), 
+           "Luminal A",
+           ifelse(merged_data$ER_STATUS == "Positive" & merged_data$GRADE == 3, 
+                  "Luminal B",
+                  ifelse(merged_data$ER_STATUS == "Negative" & 
+                         merged_data$HER2_STATUS == "Negative", 
+                         "Basal/Triple-negative", NA)))
+  )
+}
+
+# Combined Treatment Variable
+if (all(c("CHEMOTHERAPY", "HORMONE_THERAPY") %in% colnames(merged_data))) {
+  merged_data$ANY_SYSTEMIC_THERAPY <- ifelse(
+    merged_data$CHEMOTHERAPY == "YES" | merged_data$HORMONE_THERAPY == "YES",
+    "Treated",
+    ifelse(merged_data$CHEMOTHERAPY == "NO" & merged_data$HORMONE_THERAPY == "NO",
+           "Untreated", NA)
+  )
+}
+
+# ------------------------------------------------------------------------------
+# Step 1.6: Data Quality Checks
+# ------------------------------------------------------------------------------
+
+cat("\n  Data Quality Summary:\n")
+cat(sprintf("    - Total patients: %d\n", nrow(merged_data)))
+cat(sprintf("    - Patients with BLVRB expression: %d (%.1f%%)\n",
+            sum(!is.na(merged_data$BLVRB_EXPRESSION)),
+            100 * mean(!is.na(merged_data$BLVRB_EXPRESSION))))
+cat(sprintf("    - Patients with BLVRB CNA: %d (%.1f%%)\n",
+            sum(!is.na(merged_data$BLVRB_CNA)),
+            100 * mean(!is.na(merged_data$BLVRB_CNA))))
+
+if ("CHEMOTHERAPY" %in% colnames(merged_data)) {
+  cat(sprintf("    - Chemotherapy YES: %d\n", sum(merged_data$CHEMOTHERAPY == "YES", na.rm = TRUE)))
+  cat(sprintf("    - Chemotherapy NO: %d\n", sum(merged_data$CHEMOTHERAPY == "NO", na.rm = TRUE)))
+}
+
+if ("HORMONE_THERAPY" %in% colnames(merged_data)) {
+  cat(sprintf("    - Hormone therapy YES: %d\n", sum(merged_data$HORMONE_THERAPY == "YES", na.rm = TRUE)))
+  cat(sprintf("    - Hormone therapy NO: %d\n", sum(merged_data$HORMONE_THERAPY == "NO", na.rm = TRUE)))
+}
+
+cat("\n    - Subtype distribution:\n")
+print(table(merged_data$SUBTYPE_SIMPLE, useNA = "always"))
+
+# Save merged dataset
+cat("\n  Saving merged dataset...\n")
+write.csv(
+  merged_data,
+  file.path(output_dir, "data", "METABRIC_BLVRB_merged_data.csv"),
+  row.names = FALSE
+)
+cat("    - Saved to: METABRIC_BLVRB_merged_data.csv\n")
+
+# ==============================================================================
+# PHASE 2: EXPLORATORY ANALYSIS
+# ==============================================================================
+
+cat("\n====================================\n")
+cat("PHASE 2: Exploratory Analysis\n")
+cat("====================================\n\n")
+
+# ------------------------------------------------------------------------------
+# Step 2.1: Patient Characteristics Table (Table 1)
+# ------------------------------------------------------------------------------
+
+cat("  Creating Table 1: Patient Characteristics...\n")
+
+# Function to create summary statistics
+create_table1 <- function(data, group_var) {
+  
+  continuous_vars <- c("AGE_AT_DIAGNOSIS", "TUMOR_SIZE", "LYMPH_NODES_EXAMINED_POSITIVE")
+  categorical_vars <- c("ER_STATUS", "HER2_STATUS", "PR_STATUS", "GRADE", 
+                       "TUMOR_STAGE", "INFERRED_MENOPAUSAL_STATE",
+                       "CHEMOTHERAPY", "HORMONE_THERAPY", "RADIO_THERAPY",
+                       "BREAST_SURGERY", "SUBTYPE_SIMPLE")
+  
+  # Filter to variables that exist
+  continuous_vars <- continuous_vars[continuous_vars %in% colnames(data)]
+  categorical_vars <- categorical_vars[categorical_vars %in% colnames(data)]
+  
+  results_list <- list()
+  
+  # Continuous variables
+  for (var in continuous_vars) {
+    if (sum(!is.na(data[[var]])) > 0) {
+      by_group <- split(data[[var]], data[[group_var]])
+      
+      results_list[[var]] <- data.frame(
+        Variable = var,
+        Type = "Continuous",
+        BLVRB_low = sprintf("%.1f ± %.1f", 
+                           mean(by_group$`BLVRB-low`, na.rm = TRUE),
+                           sd(by_group$`BLVRB-low`, na.rm = TRUE)),
+        BLVRB_high = sprintf("%.1f ± %.1f",
+                            mean(by_group$`BLVRB-high`, na.rm = TRUE),
+                            sd(by_group$`BLVRB-high`, na.rm = TRUE)),
+        p_value = wilcox.test(by_group$`BLVRB-low`, by_group$`BLVRB-high`)$p.value,
+        stringsAsFactors = FALSE
+      )
+    }
+  }
+  
+  # Categorical variables
+  for (var in categorical_vars) {
+    if (sum(!is.na(data[[var]])) > 0) {
+      tbl <- table(data[[group_var]], data[[var]])
+      if (nrow(tbl) == 2 && ncol(tbl) > 0) {
+        prop_low <- prop.table(tbl, 1)[1, ]
+        prop_high <- prop.table(tbl, 1)[2, ]
+        
+        # Chi-square or Fisher's test
+        if (any(tbl < 5)) {
+          p_val <- tryCatch(fisher.test(tbl, simulate.p.value = TRUE)$p.value, 
+                           error = function(e) NA)
+        } else {
+          p_val <- tryCatch(chisq.test(tbl)$p.value, error = function(e) NA)
+        }
+        
+        results_list[[var]] <- data.frame(
+          Variable = var,
+          Type = "Categorical",
+          BLVRB_low = paste(names(prop_low), sprintf("%.1f%%", prop_low * 100), 
+                           sep = ": ", collapse = "; "),
+          BLVRB_high = paste(names(prop_high), sprintf("%.1f%%", prop_high * 100),
+                            sep = ": ", collapse = "; "),
+          p_value = p_val,
+          stringsAsFactors = FALSE
+        )
+      }
+    }
+  }
+  
+  table1 <- do.call(rbind, results_list)
+  return(table1)
+}
+
+table1 <- create_table1(merged_data, "BLVRB_EXPRESSION_GROUP")
+write.csv(table1, 
+          file.path(output_dir, "tables", "Table1_Patient_Characteristics.csv"),
+          row.names = FALSE)
+
+cat("    - Table 1 saved\n")
+
+# ------------------------------------------------------------------------------
+# Step 2.2: BLVRB Expression Distribution
+# ------------------------------------------------------------------------------
+
+cat("  Analyzing BLVRB expression distribution...\n")
+
+# Summary statistics
+expr_summary <- data.frame(
+  Statistic = c("N", "Mean", "Median", "SD", "Min", "Max", "Q1", "Q3", "IQR"),
+  Value = c(
+    sum(!is.na(merged_data$BLVRB_EXPRESSION)),
+    mean(merged_data$BLVRB_EXPRESSION, na.rm = TRUE),
+    median(merged_data$BLVRB_EXPRESSION, na.rm = TRUE),
+    sd(merged_data$BLVRB_EXPRESSION, na.rm = TRUE),
+    min(merged_data$BLVRB_EXPRESSION, na.rm = TRUE),
+    max(merged_data$BLVRB_EXPRESSION, na.rm = TRUE),
+    quantile(merged_data$BLVRB_EXPRESSION, 0.25, na.rm = TRUE),
+    quantile(merged_data$BLVRB_EXPRESSION, 0.75, na.rm = TRUE),
+    IQR(merged_data$BLVRB_EXPRESSION, na.rm = TRUE)
+  )
+)
+
+write.csv(expr_summary,
+          file.path(output_dir, "tables", "Table2_BLVRB_Expression_Summary.csv"),
+          row.names = FALSE)
+
+# Histogram
+p_hist <- ggplot(merged_data, aes(x = BLVRB_EXPRESSION)) +
+  geom_histogram(bins = 50, fill = "steelblue", color = "black", alpha = 0.7) +
+  geom_vline(xintercept = median_blvrb, color = "red", linetype = "dashed", size = 1) +
+  labs(title = "BLVRB Expression Distribution",
+       subtitle = sprintf("Median = %.3f (red dashed line)", median_blvrb),
+       x = "BLVRB Expression (log2)",
+       y = "Frequency") +
+  theme_bw(base_size = 12)
+
+ggsave(file.path(output_dir, "figures", "BLVRB_Expression_Histogram.png"),
+       p_hist, width = 8, height = 6, dpi = 300)
+
+cat("    - Expression histogram saved\n")
+
+# ------------------------------------------------------------------------------
+# Step 2.3: BLVRB Copy Number Distribution
+# ------------------------------------------------------------------------------
+
+cat("  Analyzing BLVRB CNA distribution...\n")
+
+# CNA frequency table
+cna_freq <- as.data.frame(table(merged_data$BLVRB_CNA, useNA = "always"))
+colnames(cna_freq) <- c("CNA_Value", "N")
+cna_freq$Percent <- 100 * cna_freq$N / sum(cna_freq$N)
+cna_freq$Meaning <- c(
+  "Deep deletion", "Shallow deletion", "Neutral/diploid",
+  "Low-level gain", "Amplification", "Missing"
+)[match(as.character(cna_freq$CNA_Value), c("-2", "-1", "0", "1", "2", NA))]
+
+write.csv(cna_freq,
+          file.path(output_dir, "tables", "Table3_BLVRB_CNA_Distribution.csv"),
+          row.names = FALSE)
+
+# Grouped CNA frequency
+cna_grouped_freq <- as.data.frame(table(merged_data$BLVRB_CNA_GROUP, useNA = "always"))
+colnames(cna_grouped_freq) <- c("CNA_Group", "N")
+cna_grouped_freq$Percent <- 100 * cna_grouped_freq$N / sum(cna_grouped_freq$N)
+
+write.csv(cna_grouped_freq,
+          file.path(output_dir, "tables", "Table3b_BLVRB_CNA_Grouped.csv"),
+          row.names = FALSE)
+
+cat("    - CNA distribution tables saved\n")
+
+# ==============================================================================
+# PHASE 3: BLVRB EXPRESSION ANALYSIS
+# ==============================================================================
+
+cat("\n====================================\n")
+cat("PHASE 3: BLVRB Expression Analysis\n")
+cat("====================================\n\n")
+
+# ------------------------------------------------------------------------------
+# Step 3.1: BLVRB Expression by Subtype
+# ------------------------------------------------------------------------------
+
+cat("  Analyzing BLVRB expression by subtype...\n")
+
+# Filter out missing subtypes
+data_with_subtype <- merged_data %>%
+  dplyr::filter(!is.na(SUBTYPE_SIMPLE), !is.na(BLVRB_EXPRESSION))
+
+if (nrow(data_with_subtype) > 0) {
+  
+  # Statistical test
+  kw_test <- kruskal.test(BLVRB_EXPRESSION ~ SUBTYPE_SIMPLE, data = data_with_subtype)
+  
+  cat(sprintf("    - Kruskal-Wallis p-value: %.4f\n", kw_test$p.value))
+  
+  # Pairwise comparisons
+  pairwise_result <- pairwise.wilcox.test(
+    data_with_subtype$BLVRB_EXPRESSION,
+    data_with_subtype$SUBTYPE_SIMPLE,
+    p.adjust.method = "bonferroni"
+  )
+  
+  # Figure 1: Boxplot by subtype
+  p_subtype <- ggplot(data_with_subtype, 
+                     aes(x = SUBTYPE_SIMPLE, y = BLVRB_EXPRESSION, fill = SUBTYPE_SIMPLE)) +
+    geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+    geom_jitter(width = 0.2, alpha = 0.3, size = 0.5) +
+    scale_fill_brewer(palette = "Set2") +
+    labs(title = "BLVRB Expression by Molecular Subtype",
+         subtitle = sprintf("Kruskal-Wallis p = %.4f", kw_test$p.value),
+         x = "Molecular Subtype",
+         y = "BLVRB Expression (log2)") +
+    theme_bw(base_size = 12) +
+    theme(legend.position = "none",
+          axis.text.x = element_text(angle = 45, hjust = 1))
+  
+  ggsave(file.path(output_dir, "figures", "Figure1_BLVRB_by_Subtype.png"),
+         p_subtype, width = 8, height = 6, dpi = 300)
+  
+  cat("    - Figure 1 saved\n")
+}
+
+# ------------------------------------------------------------------------------
+# Step 3.2: BLVRB Expression by Clinical Features
+# ------------------------------------------------------------------------------
+
+cat("  Analyzing BLVRB expression by clinical features...\n")
+
+# Function to create comparison plots
+create_comparison_plot <- function(data, group_var, title_text) {
+  
+  data_clean <- data %>%
+    dplyr::filter(!is.na(data[[group_var]]), !is.na(BLVRB_EXPRESSION))
+  
+  if (nrow(data_clean) == 0) return(NULL)
+  
+  # Statistical test
+  if (length(unique(data_clean[[group_var]])) == 2) {
+    formula_str <- paste("BLVRB_EXPRESSION ~", group_var)
+    test_result <- wilcox.test(as.formula(formula_str), data = data_clean)
+    p_val <- test_result$p.value
+  } else {
+    formula_str <- paste("BLVRB_EXPRESSION ~", group_var)
+    test_result <- kruskal.test(as.formula(formula_str), data = data_clean)
+    p_val <- test_result$p.value
+  }
+  data_clean[[group_var]] <- as.factor(data_clean[[group_var]])
+  
+  p <- ggplot(data_clean, aes(x = .data[[group_var]], y = BLVRB_EXPRESSION, 
+                              fill = .data[[group_var]])) +
+    geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+    geom_jitter(width = 0.2, alpha = 0.3, size = 0.5) +
+    scale_fill_brewer(palette = "Set1") +
+    labs(title = title_text,
+         subtitle = sprintf("p = %.4f", p_val),
+         x = group_var,
+         y = "BLVRB Expression (log2)") +
+    theme_bw(base_size = 12) +
+    theme(legend.position = "none")
+  
+  return(p)
+}
+
+# Create plots for different features
+if ("ER_STATUS" %in% colnames(merged_data)) {
+  p_er <- create_comparison_plot(merged_data, "ER_STATUS", "BLVRB Expression by ER Status")
+  if (!is.null(p_er)) {
+    ggsave(file.path(output_dir, "figures", "BLVRB_by_ER_Status.png"),
+           p_er, width = 6, height = 5, dpi = 300)
+  }
+}
+
+if ("HER2_STATUS" %in% colnames(merged_data)) {
+  p_her2 <- create_comparison_plot(merged_data, "HER2_STATUS", "BLVRB Expression by HER2 Status")
+  if (!is.null(p_her2)) {
+    ggsave(file.path(output_dir, "figures", "BLVRB_by_HER2_Status.png"),
+           p_her2, width = 6, height = 5, dpi = 300)
+  }
+}
+
+if ("GRADE" %in% colnames(merged_data)) {
+  p_grade <- create_comparison_plot(merged_data, "GRADE", "BLVRB Expression by Grade")
+  if (!is.null(p_grade)) {
+    ggsave(file.path(output_dir, "figures", "BLVRB_by_Grade.png"),
+           p_grade, width = 6, height = 5, dpi = 300)
+  }
+}
+
+cat("    - Clinical feature plots saved\n")
+
+# ==============================================================================
+# PHASE 4: BLVRB COPY NUMBER ANALYSIS
+# ==============================================================================
+
+cat("\n====================================\n")
+cat("PHASE 4: BLVRB Copy Number Analysis\n")
+cat("====================================\n\n")
+
+# ------------------------------------------------------------------------------
+# Step 4.1: CNA Distribution by Subtype
+# ------------------------------------------------------------------------------
+
+cat("  Analyzing CNA distribution by subtype...\n")
+
+data_cna_subtype <- merged_data %>%
+  dplyr::filter(!is.na(SUBTYPE_SIMPLE), !is.na(BLVRB_CNA_GROUP))
+
+if (nrow(data_cna_subtype) > 0) {
+  
+  # Contingency table
+  cna_subtype_table <- table(data_cna_subtype$SUBTYPE_SIMPLE, data_cna_subtype$BLVRB_CNA_GROUP)
+  
+  # Chi-square test
+  chisq_result <- chisq.test(cna_subtype_table)
+  
+  cat(sprintf("    - Chi-square p-value: %.4f\n", chisq_result$p.value))
+  
+  # Create proportions for plotting
+  cna_subtype_prop <- as.data.frame(prop.table(cna_subtype_table, 1) * 100)
+  colnames(cna_subtype_prop) <- c("Subtype", "CNA_Group", "Percent")
+  
+  # Figure 2: Stacked bar chart
+  p_cna_subtype <- ggplot(cna_subtype_prop, 
+                          aes(x = Subtype, y = Percent, fill = CNA_Group)) +
+    geom_bar(stat = "identity", position = "stack", color = "black") +
+    scale_fill_manual(values = c("Deleted" = "blue", "Neutral" = "gray", 
+                                 "Amplified" = "red")) +
+    labs(title = "BLVRB Copy Number Alterations by Subtype",
+         subtitle = sprintf("Chi-square p = %.4f", chisq_result$p.value),
+         x = "Molecular Subtype",
+         y = "Percentage of Patients",
+         fill = "CNA Status") +
+    theme_bw(base_size = 12) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+  ggsave(file.path(output_dir, "figures", "Figure2_CNA_by_Subtype.png"),
+         p_cna_subtype, width = 8, height = 6, dpi = 300)
+  
+  cat("    - Figure 2 saved\n")
+}
+
+# ------------------------------------------------------------------------------
+# Step 4.2: CNA vs Expression Correlation
+# ------------------------------------------------------------------------------
+
+cat("  Analyzing CNA vs Expression correlation...\n")
+
+data_cna_expr <- merged_data %>%
+  dplyr::filter(!is.na(BLVRB_CNA_GROUP), !is.na(BLVRB_EXPRESSION))
+
+if (nrow(data_cna_expr) > 0) {
+  
+  # ANOVA/Kruskal-Wallis test
+  kw_cna_expr <- kruskal.test(BLVRB_EXPRESSION ~ BLVRB_CNA_GROUP, data = data_cna_expr)
+  
+  cat(sprintf("    - Kruskal-Wallis p-value: %.4e\n", kw_cna_expr$p.value))
+  
+  # Figure 3: Boxplot
+  p_cna_expr_box <- ggplot(data_cna_expr, 
+                           aes(x = BLVRB_CNA_GROUP, y = BLVRB_EXPRESSION, 
+                               fill = BLVRB_CNA_GROUP)) +
+    geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+    geom_jitter(width = 0.2, alpha = 0.2, size = 0.5) +
+    scale_fill_manual(values = c("Deleted" = "blue", "Neutral" = "gray", 
+                                 "Amplified" = "red")) +
+    labs(title = "BLVRB Expression by Copy Number Status",
+         subtitle = sprintf("Kruskal-Wallis p = %.4e", kw_cna_expr$p.value),
+         x = "Copy Number Status",
+         y = "BLVRB Expression (log2)") +
+    theme_bw(base_size = 12) +
+    theme(legend.position = "none")
+  
+  ggsave(file.path(output_dir, "figures", "Figure3_CNA_vs_Expression_Boxplot.png"),
+         p_cna_expr_box, width = 7, height = 6, dpi = 300)
+  
+  # Figure 4: Scatter plot
+  data_cna_numeric <- merged_data %>%
+    dplyr::filter(!is.na(BLVRB_CNA), !is.na(BLVRB_EXPRESSION))
+  
+  # Correlation test
+  cor_test <- cor.test(data_cna_numeric$BLVRB_CNA, 
+                      data_cna_numeric$BLVRB_EXPRESSION,
+                      method = "spearman")
+  
+  cat(sprintf("    - Spearman correlation: %.3f (p = %.4e)\n", 
+              cor_test$estimate, cor_test$p.value))
+  
+  p_cna_expr_scatter <- ggplot(data_cna_numeric, 
+                               aes(x = BLVRB_CNA, y = BLVRB_EXPRESSION)) +
+    geom_jitter(alpha = 0.3, width = 0.1) +
+    geom_smooth(method = "lm", color = "red", se = TRUE) +
+    labs(title = "BLVRB Copy Number vs Expression",
+         subtitle = sprintf("Spearman r = %.3f, p = %.4e", 
+                          cor_test$estimate, cor_test$p.value),
+         x = "BLVRB Copy Number (-2 to +2)",
+         y = "BLVRB Expression (log2)") +
+    scale_x_continuous(breaks = -2:2) +
+    theme_bw(base_size = 12)
+  
+  ggsave(file.path(output_dir, "figures", "Figure4_CNA_vs_Expression_Scatter.png"),
+         p_cna_expr_scatter, width = 7, height = 6, dpi = 300)
+  
+  cat("    - Figures 3 & 4 saved\n")
+}
+
+# ==============================================================================
+# PHASE 5: CHEMOTHERAPY RESISTANCE ANALYSIS
+# ==============================================================================
+
+cat("\n====================================\n")
+cat("PHASE 5: Chemotherapy Resistance Analysis\n")
+cat("====================================\n\n")
+
+# Check if required columns exist
+required_chemo_cols <- c("CHEMOTHERAPY", "RFS_MONTHS", "RFS_STATUS", "BLVRB_EXPRESSION_GROUP")
+missing_cols <- setdiff(required_chemo_cols, colnames(merged_data))
+
+if (length(missing_cols) > 0) {
+  cat(sprintf("  WARNING: Missing required columns: %s\n", paste(missing_cols, collapse = ", ")))
+  cat("  Skipping chemotherapy analysis.\n")
+} else {
+  
+  # ------------------------------------------------------------------------------
+  # Step 5.0: FIX - Convert RFS_STATUS to numeric format (0/1)
+  # ------------------------------------------------------------------------------
+  cat("  Converting RFS_STATUS to numeric format...\n")
+  
+  # Check current format
+  cat("    - Current RFS_STATUS values:\n")
+  print(table(merged_data$RFS_STATUS, useNA = "always"))
+  
+  # Convert to numeric (common formats in METABRIC)
+  merged_data$RFS_STATUS_NUMERIC <- NA
+  
+  # Check if it's already numeric
+  if (is.numeric(merged_data$RFS_STATUS)) {
+    merged_data$RFS_STATUS_NUMERIC <- merged_data$RFS_STATUS
+    cat("    - RFS_STATUS is already numeric\n")
+  } else if (is.character(merged_data$RFS_STATUS)) {
+    # Convert common string formats
+    merged_data$RFS_STATUS_NUMERIC <- case_when(
+      merged_data$RFS_STATUS %in% c("1", "Relapsed", "Recurred", "YES", "Yes", "Event", "DEAD") ~ 1,
+      merged_data$RFS_STATUS %in% c("0", "Not Recurred", "NO", "No", "Censored", "Alive", "LIVING") ~ 0,
+      TRUE ~ NA_real_
+    )
+    cat("    - Converted character RFS_STATUS to numeric\n")
+  } else {
+    # Try simple conversion
+    merged_data$RFS_STATUS_NUMERIC <- as.numeric(as.character(merged_data$RFS_STATUS))
+    cat("    - Attempted simple numeric conversion\n")
+  }
+  
+  # Verify conversion
+  cat("    - Converted RFS_STATUS_NUMERIC values:\n")
+  print(table(merged_data$RFS_STATUS_NUMERIC, useNA = "always"))
+  
+  # Replace the original RFS_STATUS with numeric version
+  merged_data$RFS_STATUS <- merged_data$RFS_STATUS_NUMERIC
+  
+  # ------------------------------------------------------------------------------
+  # Step 5.1: Define Analysis Cohorts
+  # ------------------------------------------------------------------------------
+  
+  cat("  Defining chemotherapy cohorts...\n")
+  
+  chemo_treated <- merged_data %>%
+    dplyr::filter(CHEMOTHERAPY == "YES", 
+           !is.na(RFS_MONTHS), 
+           !is.na(RFS_STATUS),  # Now this should be numeric (0/1)
+           !is.na(BLVRB_EXPRESSION_GROUP))
+  
+  chemo_untreated <- merged_data %>%
+    dplyr::filter(CHEMOTHERAPY == "NO",
+           !is.na(RFS_MONTHS),
+           !is.na(RFS_STATUS),  # Now this should be numeric (0/1)
+           !is.na(BLVRB_EXPRESSION_GROUP))
+  
+  cat(sprintf("    - Chemotherapy treated: %d patients\n", nrow(chemo_treated)))
+  cat(sprintf("    - Chemotherapy untreated: %d patients\n", nrow(chemo_untreated)))
+  
+  # ------------------------------------------------------------------------------
+  # Step 5.2: Survival Analysis - Chemotherapy TREATED
+  # ------------------------------------------------------------------------------
+  
+  if (nrow(chemo_treated) > 50) {
+    
+    cat("\n  Analyzing survival in chemotherapy-treated patients...\n")
+    
+    # Create survival object - RFS_STATUS should now be numeric 0/1
+    surv_obj_chemo_treated <- Surv(
+      time = chemo_treated$RFS_MONTHS,
+      event = chemo_treated$RFS_STATUS
+    )
+    
+    # Fit survival curves
+    fit_chemo_treated <- survfit(
+      surv_obj_chemo_treated ~ BLVRB_EXPRESSION_GROUP,
+      data = chemo_treated
+    )
+    
+    # Log-rank test
+    survdiff_chemo_treated <- survdiff(
+      surv_obj_chemo_treated ~ BLVRB_EXPRESSION_GROUP,
+      data = chemo_treated
+    )
+    
+    logrank_p_treated <- 1 - pchisq(survdiff_chemo_treated$chisq, 
+                                   length(survdiff_chemo_treated$n) - 1)
+    
+    # Cox regression
+    cox_chemo_treated <- coxph(
+      surv_obj_chemo_treated ~ BLVRB_EXPRESSION_GROUP,
+      data = chemo_treated
+    )
+    
+    cox_summary_treated <- summary(cox_chemo_treated)
+    hr_treated <- cox_summary_treated$conf.int[1]
+    hr_lower_treated <- cox_summary_treated$conf.int[3]
+    hr_upper_treated <- cox_summary_treated$conf.int[4]
+    cox_p_treated <- cox_summary_treated$coefficients[5]
+    
+    cat(sprintf("    - Log-rank p-value: %.4f\n", logrank_p_treated))
+    cat(sprintf("    - Hazard ratio: %.2f (95%% CI: %.2f-%.2f, p=%.4f)\n",
+                hr_treated, hr_lower_treated, hr_upper_treated, cox_p_treated))
+    
+    # Figure 5A: KM curve for treated
+    p_km_chemo_treated <- ggsurvplot(
+      fit_chemo_treated,
+      data = chemo_treated,
+      pval = TRUE,
+      pval.method = TRUE,
+      conf.int = TRUE,
+      risk.table = TRUE,
+      risk.table.height = 0.25,
+      palette = c("blue", "red"),
+      legend.labs = c("BLVRB-low", "BLVRB-high"),
+      title = "Relapse-Free Survival: Chemotherapy-Treated Patients",
+      xlab = "Time (months)",
+      ylab = "Relapse-Free Survival Probability",
+      ggtheme = theme_bw(base_size = 12),
+      legend.title = "BLVRB Status"
+    )
+    
+    # Add HR annotation
+    p_km_chemo_treated$plot <- p_km_chemo_treated$plot +
+      annotate("text", x = max(chemo_treated$RFS_MONTHS, na.rm = TRUE) * 0.7,
+               y = 0.2,
+               label = sprintf("HR = %.2f (%.2f-%.2f)\np = %.4f",
+                             hr_treated, hr_lower_treated, hr_upper_treated, cox_p_treated),
+               size = 4, hjust = 0)
+    
+    ggsave(file.path(output_dir, "figures", "Figure5A_KM_Chemo_Treated.png"),
+           print(p_km_chemo_treated),
+           width = 10, height = 8, dpi = 300)
+    
+    cat("    - Figure 5A saved\n")
+    
+    # Save results
+    chemo_treated_results <- data.frame(
+      Analysis = "Chemotherapy Treated",
+      N = nrow(chemo_treated),
+      Events = sum(chemo_treated$RFS_STATUS),
+      HR = hr_treated,
+      HR_lower = hr_lower_treated,
+      HR_upper = hr_upper_treated,
+      Cox_p = cox_p_treated,
+      Logrank_p = logrank_p_treated
+    )
+    
+  }
+  
+  # ------------------------------------------------------------------------------
+  # Step 5.3: Survival Analysis - Chemotherapy UNTREATED
+  # ------------------------------------------------------------------------------
+  
+  if (nrow(chemo_untreated) > 50) {
+    
+    cat("\n  Analyzing survival in chemotherapy-untreated patients...\n")
+    
+    # Create survival object
+    surv_obj_chemo_untreated <- Surv(
+      time = chemo_untreated$RFS_MONTHS,
+      event = chemo_untreated$RFS_STATUS
+    )
+    
+    # Fit survival curves
+    fit_chemo_untreated <- survfit(
+      surv_obj_chemo_untreated ~ BLVRB_EXPRESSION_GROUP,
+      data = chemo_untreated
+    )
+    
+    # Log-rank test
+    survdiff_chemo_untreated <- survdiff(
+      surv_obj_chemo_untreated ~ BLVRB_EXPRESSION_GROUP,
+      data = chemo_untreated
+    )
+    
+    logrank_p_untreated <- 1 - pchisq(survdiff_chemo_untreated$chisq,
+                                     length(survdiff_chemo_untreated$n) - 1)
+    
+    # Cox regression
+    cox_chemo_untreated <- coxph(
+      surv_obj_chemo_untreated ~ BLVRB_EXPRESSION_GROUP,
+      data = chemo_untreated
+    )
+    
+    cox_summary_untreated <- summary(cox_chemo_untreated)
+    hr_untreated <- cox_summary_untreated$conf.int[1]
+    hr_lower_untreated <- cox_summary_untreated$conf.int[3]
+    hr_upper_untreated <- cox_summary_untreated$conf.int[4]
+    cox_p_untreated <- cox_summary_untreated$coefficients[5]
+    
+    cat(sprintf("    - Log-rank p-value: %.4f\n", logrank_p_untreated))
+    cat(sprintf("    - Hazard ratio: %.2f (95%% CI: %.2f-%.2f, p=%.4f)\n",
+                hr_untreated, hr_lower_untreated, hr_upper_untreated, cox_p_untreated))
+    
+    # Figure 5B: KM curve for untreated
+    p_km_chemo_untreated <- ggsurvplot(
+      fit_chemo_untreated,
+      data = chemo_untreated,
+      pval = TRUE,
+      pval.method = TRUE,
+      conf.int = TRUE,
+      risk.table = TRUE,
+      risk.table.height = 0.25,
+      palette = c("blue", "red"),
+      legend.labs = c("BLVRB-low", "BLVRB-high"),
+      title = "Relapse-Free Survival: Chemotherapy-Untreated Patients",
+      xlab = "Time (months)",
+      ylab = "Relapse-Free Survival Probability",
+      ggtheme = theme_bw(base_size = 12),
+      legend.title = "BLVRB Status"
+    )
+    
+    p_km_chemo_untreated$plot <- p_km_chemo_untreated$plot +
+      annotate("text", x = max(chemo_untreated$RFS_MONTHS, na.rm = TRUE) * 0.7,
+               y = 0.2,
+               label = sprintf("HR = %.2f (%.2f-%.2f)\np = %.4f",
+                             hr_untreated, hr_lower_untreated, hr_upper_untreated, 
+                             cox_p_untreated),
+               size = 4, hjust = 0)
+    
+    ggsave(file.path(output_dir, "figures", "Figure5B_KM_Chemo_Untreated.png"),
+           print(p_km_chemo_untreated),
+           width = 10, height = 8, dpi = 300)
+    
+    cat("    - Figure 5B saved\n")
+    
+    # Save results
+    chemo_untreated_results <- data.frame(
+      Analysis = "Chemotherapy Untreated",
+      N = nrow(chemo_untreated),
+      Events = sum(chemo_untreated$RFS_STATUS),
+      HR = hr_untreated,
+      HR_lower = hr_lower_untreated,
+      HR_upper = hr_upper_untreated,
+      Cox_p = cox_p_untreated,
+      Logrank_p = logrank_p_untreated
+    )
+    
+  }
+  
+  # ------------------------------------------------------------------------------
+  # Step 5.4: Interaction Test
+  # ------------------------------------------------------------------------------
+  
+  cat("\n  Testing for treatment interaction...\n")
+  
+  chemo_all <- merged_data %>%
+    dplyr::filter(CHEMOTHERAPY %in% c("YES", "NO"),
+           !is.na(RFS_MONTHS),
+           !is.na(RFS_STATUS),
+           !is.na(BLVRB_EXPRESSION_GROUP))
+  
+  if (nrow(chemo_all) > 100) {
+    
+    surv_obj_all <- Surv(time = chemo_all$RFS_MONTHS, event = chemo_all$RFS_STATUS)
+    
+    # Model with interaction
+    cox_interaction <- coxph(
+      surv_obj_all ~ BLVRB_EXPRESSION_GROUP * CHEMOTHERAPY,
+      data = chemo_all
+    )
+    
+    interaction_summary <- summary(cox_interaction)
+    
+    # Extract interaction term p-value
+    interaction_coef <- grep(":", rownames(interaction_summary$coefficients))
+    if (length(interaction_coef) > 0) {
+      interaction_p <- interaction_summary$coefficients[interaction_coef, 5]
+      cat(sprintf("    - Interaction p-value: %.4f\n", interaction_p))
+      
+      if (interaction_p < 0.05) {
+        cat("    *** SIGNIFICANT INTERACTION: BLVRB effect differs by chemotherapy status\n")
+        cat("    *** This suggests BLVRB is a TREATMENT-SPECIFIC resistance marker\n")
+      } else {
+        cat("    - No significant interaction: BLVRB is a general prognostic marker\n")
+      }
+    }
+    
+    # Create combined table
+    if (exists("chemo_treated_results") && exists("chemo_untreated_results")) {
+      chemo_combined_results <- rbind(chemo_treated_results, chemo_untreated_results)
+      chemo_combined_results$Interaction_p <- interaction_p
+      
+      write.csv(chemo_combined_results,
+                file.path(output_dir, "tables", "Table4_Chemotherapy_Survival_Results.csv"),
+                row.names = FALSE)
+      
+      cat("    - Table 4 saved\n")
+    }
+    
+    # Figure 6: Four-group comparison
+    chemo_all$Group <- paste(chemo_all$BLVRB_EXPRESSION_GROUP, 
+                            chemo_all$CHEMOTHERAPY, sep = " + ")
+    
+    fit_four_groups <- survfit(surv_obj_all ~ Group, data = chemo_all)
+    
+    p_km_four_groups <- ggsurvplot(
+      fit_four_groups,
+      data = chemo_all,
+      pval = TRUE,
+      conf.int = FALSE,
+      risk.table = TRUE,
+      risk.table.height = 0.3,
+      palette = c("darkblue", "lightblue", "darkred", "pink"),
+      title = "Relapse-Free Survival: BLVRB × Chemotherapy",
+      xlab = "Time (months)",
+      ylab = "Relapse-Free Survival Probability",
+      ggtheme = theme_bw(base_size = 11),
+      legend.title = "Group",
+      legend.labs = c("BLVRB-high + Chemo", "BLVRB-high + No chemo",
+                     "BLVRB-low + Chemo", "BLVRB-low + No chemo")
+    )
+    
+    ggsave(file.path(output_dir, "figures", "Figure6_KM_Four_Groups_Chemo.png"),
+           print(p_km_four_groups),
+           width = 12, height = 9, dpi = 300)
+    
+    cat("    - Figure 6 saved\n")
+  }
+  
+  # ------------------------------------------------------------------------------
+  # Step 5.5: Multivariable Analysis - FIXED with dplyr::select
+  # ------------------------------------------------------------------------------
+  
+  cat("\n  Performing multivariable Cox regression for chemotherapy...\n")
+  
+  # Prepare data for multivariable analysis
+  mv_vars <- c("BLVRB_EXPRESSION_GROUP", "AGE_AT_DIAGNOSIS", "TUMOR_STAGE",
+               "GRADE", "ER_STATUS", "HER2_STATUS", "LYMPH_NODES_EXAMINED_POSITIVE")
+  
+  # FIXED: Use dplyr::select to avoid conflicts with MASS::select
+  chemo_mv_data <- chemo_treated %>%
+    dplyr::select(PATIENT_ID, RFS_MONTHS, RFS_STATUS, all_of(mv_vars[mv_vars %in% colnames(chemo_treated)])) %>%
+    na.omit()
+  
+  if (nrow(chemo_mv_data) > 100) {
+    
+    surv_obj_mv <- Surv(time = chemo_mv_data$RFS_MONTHS, 
+                       event = chemo_mv_data$RFS_STATUS)
+    
+    # Build formula
+    formula_vars <- intersect(mv_vars, colnames(chemo_mv_data))
+    formula_str <- paste("surv_obj_mv ~", paste(formula_vars, collapse = " + "))
+    
+    cox_mv <- coxph(as.formula(formula_str), data = chemo_mv_data)
+    
+    # Extract results
+    mv_results <- broom::tidy(cox_mv, exponentiate = TRUE, conf.int = TRUE)
+    
+    write.csv(mv_results,
+              file.path(output_dir, "tables", "Table5_Chemotherapy_Multivariable.csv"),
+              row.names = FALSE)
+    
+    cat("    - Table 5 saved\n")
+    cat(sprintf("    - BLVRB remains significant: %s\n", 
+                ifelse(mv_results$p.value[1] < 0.05, "YES", "NO")))
+  }
+}
+
+# ==============================================================================
+# PHASE 6: HORMONE THERAPY RESISTANCE ANALYSIS
+# ==============================================================================
+
+cat("\n====================================\n")
+cat("PHASE 6: Hormone Therapy Resistance Analysis\n")
+cat("====================================\n\n")
+
+# Check if required columns exist
+required_hormone_cols <- c("HORMONE_THERAPY", "ER_STATUS", "RFS_MONTHS", 
+                          "RFS_STATUS", "BLVRB_EXPRESSION_GROUP")
+missing_cols <- setdiff(required_hormone_cols, colnames(merged_data))
+
+if (length(missing_cols) > 0) {
+  cat(sprintf("  WARNING: Missing required columns: %s\n", paste(missing_cols, collapse = ", ")))
+  cat("  Skipping hormone therapy analysis.\n")
+} else {
+  
+  # Note: RFS_STATUS should already be converted from Phase 5 fix
+  # If it wasn't converted, do it now
+  if (!is.numeric(merged_data$RFS_STATUS)) {
+    cat("  Converting RFS_STATUS to numeric format...\n")
+    merged_data$RFS_STATUS <- as.numeric(as.character(merged_data$RFS_STATUS))
+  }
+  
+  # ------------------------------------------------------------------------------
+  # Step 6.1: Define Eligible Patients (ER-positive only)
+  # ------------------------------------------------------------------------------
+  
+  cat("  Defining hormone therapy cohorts (ER+ patients only)...\n")
+  
+  hormone_treated <- merged_data %>%
+    dplyr::filter(ER_STATUS == "Positive",
+           HORMONE_THERAPY == "YES",
+           !is.na(RFS_MONTHS),
+           !is.na(RFS_STATUS),
+           !is.na(BLVRB_EXPRESSION_GROUP))
+  
+  hormone_untreated <- merged_data %>%
+    dplyr::filter(ER_STATUS == "Positive",
+           HORMONE_THERAPY == "NO",
+           !is.na(RFS_MONTHS),
+           !is.na(RFS_STATUS),
+           !is.na(BLVRB_EXPRESSION_GROUP))
+  
+  cat(sprintf("    - Hormone therapy treated (ER+): %d patients\n", nrow(hormone_treated)))
+  cat(sprintf("    - Hormone therapy untreated (ER+): %d patients\n", nrow(hormone_untreated)))
+  
+  # ------------------------------------------------------------------------------
+  # Step 6.2: Survival Analysis - Hormone Therapy TREATED
+  # ------------------------------------------------------------------------------
+  
+  if (nrow(hormone_treated) > 50) {
+    
+    cat("\n  Analyzing survival in hormone therapy-treated patients...\n")
+    
+    surv_obj_hormone_treated <- Surv(
+      time = hormone_treated$RFS_MONTHS,
+      event = hormone_treated$RFS_STATUS
+    )
+    
+    fit_hormone_treated <- survfit(
+      surv_obj_hormone_treated ~ BLVRB_EXPRESSION_GROUP,
+      data = hormone_treated
+    )
+    
+    survdiff_hormone_treated <- survdiff(
+      surv_obj_hormone_treated ~ BLVRB_EXPRESSION_GROUP,
+      data = hormone_treated
+    )
+    
+    logrank_p_hormone_treated <- 1 - pchisq(survdiff_hormone_treated$chisq,
+                                           length(survdiff_hormone_treated$n) - 1)
+    
+    cox_hormone_treated <- coxph(
+      surv_obj_hormone_treated ~ BLVRB_EXPRESSION_GROUP,
+      data = hormone_treated
+    )
+    
+    cox_summary_hormone_treated <- summary(cox_hormone_treated)
+    hr_hormone_treated <- cox_summary_hormone_treated$conf.int[1]
+    hr_lower_hormone_treated <- cox_summary_hormone_treated$conf.int[3]
+    hr_upper_hormone_treated <- cox_summary_hormone_treated$conf.int[4]
+    cox_p_hormone_treated <- cox_summary_hormone_treated$coefficients[5]
+    
+    cat(sprintf("    - Log-rank p-value: %.4f\n", logrank_p_hormone_treated))
+    cat(sprintf("    - Hazard ratio: %.2f (95%% CI: %.2f-%.2f, p=%.4f)\n",
+                hr_hormone_treated, hr_lower_hormone_treated, 
+                hr_upper_hormone_treated, cox_p_hormone_treated))
+    
+    # Figure 7A
+    p_km_hormone_treated <- ggsurvplot(
+      fit_hormone_treated,
+      data = hormone_treated,
+      pval = TRUE,
+      conf.int = TRUE,
+      risk.table = TRUE,
+      risk.table.height = 0.25,
+      palette = c("blue", "red"),
+      legend.labs = c("BLVRB-low", "BLVRB-high"),
+      title = "Relapse-Free Survival: Hormone Therapy-Treated Patients (ER+)",
+      xlab = "Time (months)",
+      ylab = "Relapse-Free Survival Probability",
+      ggtheme = theme_bw(base_size = 12),
+      legend.title = "BLVRB Status"
+    )
+    
+    p_km_hormone_treated$plot <- p_km_hormone_treated$plot +
+      annotate("text", x = max(hormone_treated$RFS_MONTHS, na.rm = TRUE) * 0.7,
+               y = 0.2,
+               label = sprintf("HR = %.2f (%.2f-%.2f)\np = %.4f",
+                             hr_hormone_treated, hr_lower_hormone_treated,
+                             hr_upper_hormone_treated, cox_p_hormone_treated),
+               size = 4, hjust = 0)
+    
+    ggsave(file.path(output_dir, "figures", "Figure7A_KM_Hormone_Treated.png"),
+           print(p_km_hormone_treated),
+           width = 10, height = 8, dpi = 300)
+    
+    cat("    - Figure 7A saved\n")
+    
+    hormone_treated_results <- data.frame(
+      Analysis = "Hormone Therapy Treated (ER+)",
+      N = nrow(hormone_treated),
+      Events = sum(hormone_treated$RFS_STATUS),
+      HR = hr_hormone_treated,
+      HR_lower = hr_lower_hormone_treated,
+      HR_upper = hr_upper_hormone_treated,
+      Cox_p = cox_p_hormone_treated,
+      Logrank_p = logrank_p_hormone_treated
+    )
+  }
+  
+  # ------------------------------------------------------------------------------
+  # Step 6.3: Survival Analysis - Hormone Therapy UNTREATED
+  # ------------------------------------------------------------------------------
+  
+  if (nrow(hormone_untreated) > 30) {
+    
+    cat("\n  Analyzing survival in hormone therapy-untreated patients...\n")
+    
+    surv_obj_hormone_untreated <- Surv(
+      time = hormone_untreated$RFS_MONTHS,
+      event = hormone_untreated$RFS_STATUS
+    )
+    
+    fit_hormone_untreated <- survfit(
+      surv_obj_hormone_untreated ~ BLVRB_EXPRESSION_GROUP,
+      data = hormone_untreated
+    )
+    
+    survdiff_hormone_untreated <- survdiff(
+      surv_obj_hormone_untreated ~ BLVRB_EXPRESSION_GROUP,
+      data = hormone_untreated
+    )
+    
+    logrank_p_hormone_untreated <- 1 - pchisq(survdiff_hormone_untreated$chisq,
+                                             length(survdiff_hormone_untreated$n) - 1)
+    
+    cox_hormone_untreated <- coxph(
+      surv_obj_hormone_untreated ~ BLVRB_EXPRESSION_GROUP,
+      data = hormone_untreated
+    )
+    
+    cox_summary_hormone_untreated <- summary(cox_hormone_untreated)
+    hr_hormone_untreated <- cox_summary_hormone_untreated$conf.int[1]
+    hr_lower_hormone_untreated <- cox_summary_hormone_untreated$conf.int[3]
+    hr_upper_hormone_untreated <- cox_summary_hormone_untreated$conf.int[4]
+    cox_p_hormone_untreated <- cox_summary_hormone_untreated$coefficients[5]
+    
+    cat(sprintf("    - Log-rank p-value: %.4f\n", logrank_p_hormone_untreated))
+    cat(sprintf("    - Hazard ratio: %.2f (95%% CI: %.2f-%.2f, p=%.4f)\n",
+                hr_hormone_untreated, hr_lower_hormone_untreated,
+                hr_upper_hormone_untreated, cox_p_hormone_untreated))
+    
+    # Figure 7B
+    p_km_hormone_untreated <- ggsurvplot(
+      fit_hormone_untreated,
+      data = hormone_untreated,
+      pval = TRUE,
+      conf.int = TRUE,
+      risk.table = TRUE,
+      risk.table.height = 0.25,
+      palette = c("blue", "red"),
+      legend.labs = c("BLVRB-low", "BLVRB-high"),
+      title = "Relapse-Free Survival: Hormone Therapy-Untreated Patients (ER+)",
+      xlab = "Time (months)",
+      ylab = "Relapse-Free Survival Probability",
+      ggtheme = theme_bw(base_size = 12),
+      legend.title = "BLVRB Status"
+    )
+    
+    ggsave(file.path(output_dir, "figures", "Figure7B_KM_Hormone_Untreated.png"),
+           print(p_km_hormone_untreated),
+           width = 10, height = 8, dpi = 300)
+    
+    cat("    - Figure 7B saved\n")
+    
+    hormone_untreated_results <- data.frame(
+      Analysis = "Hormone Therapy Untreated (ER+)",
+      N = nrow(hormone_untreated),
+      Events = sum(hormone_untreated$RFS_STATUS),
+      HR = hr_hormone_untreated,
+      HR_lower = hr_lower_hormone_untreated,
+      HR_upper = hr_upper_hormone_untreated,
+      Cox_p = cox_p_hormone_untreated,
+      Logrank_p = logrank_p_hormone_untreated
+    )
+  } else {
+    cat("    - WARNING: Too few untreated patients for meaningful analysis\n")
+  }
+  
+  # ------------------------------------------------------------------------------
+  # Step 6.4: Interaction Test
+  # ------------------------------------------------------------------------------
+  
+  cat("\n  Testing for hormone therapy interaction...\n")
+  
+  hormone_all <- merged_data %>%
+    dplyr::filter(ER_STATUS == "Positive",
+           HORMONE_THERAPY %in% c("YES", "NO"),
+           !is.na(RFS_MONTHS),
+           !is.na(RFS_STATUS),
+           !is.na(BLVRB_EXPRESSION_GROUP))
+  
+  if (nrow(hormone_all) > 100) {
+    
+    surv_obj_hormone_all <- Surv(time = hormone_all$RFS_MONTHS,
+                                event = hormone_all$RFS_STATUS)
+    
+    cox_hormone_interaction <- coxph(
+      surv_obj_hormone_all ~ BLVRB_EXPRESSION_GROUP * HORMONE_THERAPY,
+      data = hormone_all
+    )
+    
+    interaction_summary_hormone <- summary(cox_hormone_interaction)
+    
+    interaction_coef <- grep(":", rownames(interaction_summary_hormone$coefficients))
+    if (length(interaction_coef) > 0) {
+      hormone_interaction_p <- interaction_summary_hormone$coefficients[interaction_coef, 5]
+      cat(sprintf("    - Interaction p-value: %.4f\n", hormone_interaction_p))
+      
+      if (hormone_interaction_p < 0.05) {
+        cat("    *** SIGNIFICANT INTERACTION: BLVRB effect differs by hormone therapy status\n")
+      } else {
+        cat("    - No significant interaction: BLVRB is a general marker in ER+ disease\n")
+      }
+    }
+    
+    # Create combined table
+    if (exists("hormone_treated_results") && exists("hormone_untreated_results")) {
+      hormone_combined_results <- rbind(hormone_treated_results, hormone_untreated_results)
+      hormone_combined_results$Interaction_p <- hormone_interaction_p
+      
+      write.csv(hormone_combined_results,
+                file.path(output_dir, "tables", "Table6_Hormone_Therapy_Survival_Results.csv"),
+                row.names = FALSE)
+      
+      cat("    - Table 6 saved\n")
+    }
+  }
+  
+  # ------------------------------------------------------------------------------
+  # Step 6.5: Multivariable Analysis - FIXED with dplyr::select
+  # ------------------------------------------------------------------------------
+  
+  if (nrow(hormone_treated) > 100) {
+    
+    cat("\n  Performing multivariable Cox regression for hormone therapy...\n")
+    
+    mv_vars_hormone <- c("BLVRB_EXPRESSION_GROUP", "AGE_AT_DIAGNOSIS", "TUMOR_STAGE",
+                        "GRADE", "PR_STATUS", "HER2_STATUS", "LYMPH_NODES_EXAMINED_POSITIVE")
+    
+    # FIXED: Use dplyr::select to avoid conflicts with MASS::select
+    hormone_mv_data <- hormone_treated %>%
+      dplyr::select(PATIENT_ID, RFS_MONTHS, RFS_STATUS, 
+             all_of(mv_vars_hormone[mv_vars_hormone %in% colnames(hormone_treated)])) %>%
+      na.omit()
+    
+    if (nrow(hormone_mv_data) > 100) {
+      
+      surv_obj_hormone_mv <- Surv(time = hormone_mv_data$RFS_MONTHS,
+                                 event = hormone_mv_data$RFS_STATUS)
+      
+      formula_vars_hormone <- intersect(mv_vars_hormone, colnames(hormone_mv_data))
+      formula_str_hormone <- paste("surv_obj_hormone_mv ~", 
+                                  paste(formula_vars_hormone, collapse = " + "))
+      
+      cox_hormone_mv <- coxph(as.formula(formula_str_hormone), data = hormone_mv_data)
+      
+      mv_results_hormone <- broom::tidy(cox_hormone_mv, exponentiate = TRUE, conf.int = TRUE)
+      
+      write.csv(mv_results_hormone,
+                file.path(output_dir, "tables", "Table7_Hormone_Therapy_Multivariable.csv"),
+                row.names = FALSE)
+      
+      cat("    - Table 7 saved\n")
+    }
+  }
+}
+
+# ==============================================================================
+# PHASE 7: ROC CURVE ANALYSIS
+# ==============================================================================
+
+cat("\n====================================\n")
+cat("PHASE 7: ROC Curve Analysis\n")
+cat("====================================\n\n")
+
+# ------------------------------------------------------------------------------
+# Step 7.1-7.3: ROC Analysis for Chemotherapy
+# ------------------------------------------------------------------------------
+
+if (exists("chemo_treated") && nrow(chemo_treated) > 100) {
+  
+  cat("  Performing ROC analysis for chemotherapy resistance...\n")
+  
+  # Define early relapse (within 24 months)
+  chemo_treated$EARLY_RELAPSE <- ifelse(
+    chemo_treated$RFS_STATUS == 1 & chemo_treated$RFS_MONTHS <= 24,
+    1, 0
+  )
+  
+  # Filter complete cases
+  roc_chemo_data <- chemo_treated %>%
+    dplyr::filter(!is.na(BLVRB_EXPRESSION), !is.na(EARLY_RELAPSE))
+  
+  if (nrow(roc_chemo_data) > 50 && sum(roc_chemo_data$EARLY_RELAPSE) > 10) {
+    
+    # Calculate ROC
+    roc_chemo <- roc(
+      response = roc_chemo_data$EARLY_RELAPSE,
+      predictor = roc_chemo_data$BLVRB_EXPRESSION,
+      direction = ">"
+    )
+    
+    # Get optimal cutpoint
+    coords_chemo <- coords(roc_chemo, "best", ret = c("threshold", "sensitivity", 
+                                                      "specificity", "ppv", "npv"))
+    
+    cat(sprintf("    - AUC: %.3f (95%% CI: %.3f-%.3f)\n",
+                auc(roc_chemo),
+                ci.auc(roc_chemo)[1],
+                ci.auc(roc_chemo)[3]))
+    cat(sprintf("    - Optimal cutpoint: %.3f\n", coords_chemo$threshold))
+    cat(sprintf("    - Sensitivity: %.1f%%\n", coords_chemo$sensitivity * 100))
+    cat(sprintf("    - Specificity: %.1f%%\n", coords_chemo$specificity * 100))
+    
+    # Figure 8A: ROC curve for chemotherapy
+    png(file.path(output_dir, "figures", "Figure8A_ROC_Chemotherapy.png"),
+        width = 8, height = 8, units = "in", res = 300)
+    
+    plot(roc_chemo, 
+         main = "ROC Curve: BLVRB Predicting Chemotherapy Resistance",
+         col = "red", lwd = 2,
+         print.auc = TRUE,
+         print.auc.y = 0.4)
+    
+    # Add diagonal reference line
+    abline(a = 0, b = 1, lty = 2, col = "gray")
+    
+    # Mark optimal point
+    points(coords_chemo$specificity, coords_chemo$sensitivity, 
+           pch = 19, col = "blue", cex = 2)
+    
+    text(coords_chemo$specificity - 0.1, coords_chemo$sensitivity + 0.05,
+         sprintf("Optimal cutpoint\n%.3f", coords_chemo$threshold),
+         cex = 0.9)
+    
+    dev.off()
+    
+    cat("    - Figure 8A saved\n")
+    
+    # Save ROC metrics
+    roc_chemo_metrics <- data.frame(
+      Analysis = "Chemotherapy Resistance",
+      AUC = auc(roc_chemo),
+      AUC_lower = ci.auc(roc_chemo)[1],
+      AUC_upper = ci.auc(roc_chemo)[3],
+      Optimal_cutpoint = coords_chemo$threshold,
+      Sensitivity = coords_chemo$sensitivity,
+      Specificity = coords_chemo$specificity,
+      PPV = coords_chemo$ppv,
+      NPV = coords_chemo$npv
+    )
+  }
+}
+
+# ------------------------------------------------------------------------------
+# Step 7.4-7.5: ROC Analysis for Hormone Therapy
+# ------------------------------------------------------------------------------
+
+if (exists("hormone_treated") && nrow(hormone_treated) > 100) {
+  
+  cat("\n  Performing ROC analysis for hormone therapy resistance...\n")
+  
+  # Define early relapse
+  hormone_treated$EARLY_RELAPSE <- ifelse(
+    hormone_treated$RFS_STATUS == 1 & hormone_treated$RFS_MONTHS <= 24,
+    1, 0
+  )
+  
+  roc_hormone_data <- hormone_treated %>%
+    dplyr::filter(!is.na(BLVRB_EXPRESSION), !is.na(EARLY_RELAPSE))
+  
+  if (nrow(roc_hormone_data) > 50 && sum(roc_hormone_data$EARLY_RELAPSE) > 10) {
+    
+    roc_hormone <- roc(
+      response = roc_hormone_data$EARLY_RELAPSE,
+      predictor = roc_hormone_data$BLVRB_EXPRESSION,
+      direction = ">"
+    )
+    
+    coords_hormone <- coords(roc_hormone, "best", ret = c("threshold", "sensitivity",
+                                                          "specificity", "ppv", "npv"))
+    
+    cat(sprintf("    - AUC: %.3f (95%% CI: %.3f-%.3f)\n",
+                auc(roc_hormone),
+                ci.auc(roc_hormone)[1],
+                ci.auc(roc_hormone)[3]))
+    
+    # Figure 8B
+    png(file.path(output_dir, "figures", "Figure8B_ROC_Hormone_Therapy.png"),
+        width = 8, height = 8, units = "in", res = 300)
+    
+    plot(roc_hormone,
+         main = "ROC Curve: BLVRB Predicting Hormone Therapy Resistance",
+         col = "red", lwd = 2,
+         print.auc = TRUE,
+         print.auc.y = 0.4)
+    
+    abline(a = 0, b = 1, lty = 2, col = "gray")
+    
+    points(coords_hormone$specificity, coords_hormone$sensitivity,
+           pch = 19, col = "blue", cex = 2)
+    
+    dev.off()
+    
+    cat("    - Figure 8B saved\n")
+    
+    roc_hormone_metrics <- data.frame(
+      Analysis = "Hormone Therapy Resistance",
+      AUC = auc(roc_hormone),
+      AUC_lower = ci.auc(roc_hormone)[1],
+      AUC_upper = ci.auc(roc_hormone)[3],
+      Optimal_cutpoint = coords_hormone$threshold,
+      Sensitivity = coords_hormone$sensitivity,
+      Specificity = coords_hormone$specificity,
+      PPV = coords_hormone$ppv,
+      NPV = coords_hormone$npv
+    )
+    
+    # Compare AUCs
+    if (exists("roc_chemo_metrics")) {
+      
+      roc_comparison <- roc.test(roc_chemo, roc_hormone, method = "delong")
+      
+      cat(sprintf("\n  Comparing ROC curves:\n"))
+      cat(sprintf("    - DeLong test p-value: %.4f\n", roc_comparison$p.value))
+      
+      if (roc_comparison$p.value < 0.05) {
+        cat("    *** AUCs are significantly different\n")
+      } else {
+        cat("    - AUCs are not significantly different\n")
+      }
+    }
+    
+    # Combine ROC metrics
+    if (exists("roc_chemo_metrics")) {
+      roc_combined_metrics <- rbind(roc_chemo_metrics, roc_hormone_metrics)
+      
+      write.csv(roc_combined_metrics,
+                file.path(output_dir, "tables", "Table8_ROC_Analysis_Metrics.csv"),
+                row.names = FALSE)
+      
+      cat("\n    - Table 8 saved\n")
+    }
+  }
+}
+
+# ==============================================================================
+# FINAL SUMMARY
+# ==============================================================================
+
+cat("\n====================================\n")
+cat("ANALYSIS COMPLETE!\n")
+cat("====================================\n\n")
+
+cat("All results saved to:\n")
+cat(sprintf("  %s\n\n", output_dir))
+
+cat("Output structure:\n")
+cat("  - data/: Merged datasets\n")
+cat("  - figures/: All plots and visualizations\n")
+cat("  - tables/: All statistical results\n\n")
+
+# Create summary report
+sink(file.path(output_dir, "Analysis_Summary.txt"))
+
+cat("BLVRB THERAPY RESISTANCE ANALYSIS - SUMMARY REPORT\n")
+cat("===================================================\n\n")
+
+cat("Dataset: METABRIC\n")
+cat(sprintf("Total patients analyzed: %d\n", nrow(merged_data)))
+cat(sprintf("Patients with BLVRB expression: %d\n", sum(!is.na(merged_data$BLVRB_EXPRESSION))))
+cat(sprintf("Patients with BLVRB CNA: %d\n\n", sum(!is.na(merged_data$BLVRB_CNA))))
+
+cat("Key Findings:\n")
+cat("-------------\n")
+
+if (exists("chemo_treated_results")) {
+  cat("\nChemotherapy Analysis:\n")
+  cat(sprintf("  - Treated patients: %d\n", chemo_treated_results$N))
+  cat(sprintf("  - Events: %d\n", chemo_treated_results$Events))
+  cat(sprintf("  - Hazard Ratio: %.2f (95%% CI: %.2f-%.2f)\n",
+              chemo_treated_results$HR,
+              chemo_treated_results$HR_lower,
+              chemo_treated_results$HR_upper))
+  cat(sprintf("  - P-value: %.4f\n", chemo_treated_results$Cox_p))
+  cat(sprintf("  - Significant: %s\n", ifelse(chemo_treated_results$Cox_p < 0.05, "YES", "NO")))
+}
+
+if (exists("hormone_treated_results")) {
+  cat("\nHormone Therapy Analysis:\n")
+  cat(sprintf("  - Treated patients: %d\n", hormone_treated_results$N))
+  cat(sprintf("  - Events: %d\n", hormone_treated_results$Events))
+  cat(sprintf("  - Hazard Ratio: %.2f (95%% CI: %.2f-%.2f)\n",
+              hormone_treated_results$HR,
+              hormone_treated_results$HR_lower,
+              hormone_treated_results$HR_upper))
+  cat(sprintf("  - P-value: %.4f\n", hormone_treated_results$Cox_p))
+  cat(sprintf("  - Significant: %s\n", ifelse(hormone_treated_results$Cox_p < 0.05, "YES", "NO")))
+}
+
+if (exists("roc_chemo_metrics")) {
+  cat("\nROC Analysis - Chemotherapy:\n")
+  cat(sprintf("  - AUC: %.3f (95%% CI: %.3f-%.3f)\n",
+              roc_chemo_metrics$AUC,
+              roc_chemo_metrics$AUC_lower,
+              roc_chemo_metrics$AUC_upper))
+  cat(sprintf("  - Optimal cutpoint: %.3f\n", roc_chemo_metrics$Optimal_cutpoint))
+  cat(sprintf("  - Sensitivity: %.1f%%\n", roc_chemo_metrics$Sensitivity * 100))
+  cat(sprintf("  - Specificity: %.1f%%\n", roc_chemo_metrics$Specificity * 100))
+}
+
+if (exists("roc_hormone_metrics")) {
+  cat("\nROC Analysis - Hormone Therapy:\n")
+  cat(sprintf("  - AUC: %.3f (95%% CI: %.3f-%.3f)\n",
+              roc_hormone_metrics$AUC,
+              roc_hormone_metrics$AUC_lower,
+              roc_hormone_metrics$AUC_upper))
+}
+
+cat("\n\nFiles Generated:\n")
+cat("----------------\n")
+list.files(output_dir, recursive = TRUE) %>%
+  paste("  -", .) %>%
+  cat(sep = "\n")
+
+cat("\n\nAnalysis completed: ", format(Sys.time(), "%Y-%m-%d %H:%M:%S"), "\n")
+
+sink()
+
+cat("\nSummary report saved to: Analysis_Summary.txt\n")
+
+cat("\n*** ANALYSIS COMPLETE! ***\n")
+cat("Review the output folder for all results.\n")
+```
+
+

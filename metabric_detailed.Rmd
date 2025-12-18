@@ -1128,11 +1128,13 @@ if (length(missing_cols) > 0) {
                label = sprintf("HR = %.2f (%.2f-%.2f)\np = %.4f",
                              hr_treated, hr_lower_treated, hr_upper_treated, cox_p_treated),
                size = 4, hjust = 0)
-    
-    ggsave(file.path(output_dir, "figures", "Figure5A_KM_Chemo_Treated.png"),
-           print(p_km_chemo_treated),
-           width = 10, height = 8, dpi = 300)
-    
+
+    # Save using png device (proper way for ggsurvplot)
+    png(file.path(output_dir, "figures", "Figure5A_KM_Chemo_Treated.png"),
+        width = 10, height = 8, units = "in", res = 300)
+    print(p_km_chemo_treated)
+    dev.off()
+
     cat("    - Figure 5A saved\n")
     
     # Save results
@@ -1220,9 +1222,11 @@ if (length(missing_cols) > 0) {
                              cox_p_untreated),
                size = 4, hjust = 0)
     
-    ggsave(file.path(output_dir, "figures", "Figure5B_KM_Chemo_Untreated.png"),
-           print(p_km_chemo_untreated),
-           width = 10, height = 8, dpi = 300)
+    # Save using png device
+    png(file.path(output_dir, "figures", "Figure5B_KM_Chemo_Untreated.png"),
+        width = 10, height = 8, units = "in", res = 300)
+    print(p_km_chemo_untreated)
+    dev.off()
     
     cat("    - Figure 5B saved\n")
     
@@ -1313,9 +1317,11 @@ if (length(missing_cols) > 0) {
                      "BLVRB-low + Chemo", "BLVRB-low + No chemo")
     )
     
-    ggsave(file.path(output_dir, "figures", "Figure6_KM_Four_Groups_Chemo.png"),
-           print(p_km_four_groups),
-           width = 12, height = 9, dpi = 300)
+    # Save using png device
+    png(file.path(output_dir, "figures", "Figure6_KM_Four_Groups_Chemo.png"),
+        width = 12, height = 9, units = "in", res = 300)
+    print(p_km_four_groups)
+    dev.off()
     
     cat("    - Figure 6 saved\n")
   }
@@ -1484,9 +1490,11 @@ if (length(missing_cols) > 0) {
                              hr_upper_hormone_treated, cox_p_hormone_treated),
                size = 4, hjust = 0)
     
-    ggsave(file.path(output_dir, "figures", "Figure7A_KM_Hormone_Treated.png"),
-           print(p_km_hormone_treated),
-           width = 10, height = 8, dpi = 300)
+    # Save using png device
+    png(file.path(output_dir, "figures", "Figure7A_KM_Hormone_Treated.png"),
+        width = 10, height = 8, units = "in", res = 300)
+    print(p_km_hormone_treated)
+    dev.off()
     
     cat("    - Figure 7A saved\n")
     
@@ -1561,9 +1569,11 @@ if (length(missing_cols) > 0) {
       legend.title = "BLVRB Status"
     )
     
-    ggsave(file.path(output_dir, "figures", "Figure7B_KM_Hormone_Untreated.png"),
-           print(p_km_hormone_untreated),
-           width = 10, height = 8, dpi = 300)
+    # Save using png device
+    png(file.path(output_dir, "figures", "Figure7B_KM_Hormone_Untreated.png"),
+        width = 10, height = 8, units = "in", res = 300)
+    print(p_km_hormone_untreated)
+    dev.off()
     
     cat("    - Figure 7B saved\n")
     
@@ -1966,9 +1976,11 @@ if (all(c("OS_MONTHS", "OS_STATUS", "BLVRB_EXPRESSION_GROUP") %in% colnames(merg
                              hr_os, hr_lower_os, hr_upper_os, cox_p_os),
                size = 4, hjust = 0)
 
-    ggsave(file.path(output_dir, "figures", "Figure9_KM_Overall_Survival.png"),
-           print(p_km_os),
-           width = 10, height = 8, dpi = 300)
+    # Save using png device
+    png(file.path(output_dir, "figures", "Figure9_KM_Overall_Survival.png"),
+        width = 10, height = 8, units = "in", res = 300)
+    print(p_km_os)
+    dev.off()
 
     cat("    - Figure 9 saved\n")
   }
@@ -2015,9 +2027,11 @@ if (all(c("CHEMOTHERAPY", "OS_MONTHS", "OS_STATUS") %in% colnames(merged_data)))
                      "BLVRB-low + Chemo", "BLVRB-low + No chemo")
     )
 
-    ggsave(file.path(output_dir, "figures", "Figure10_KM_OS_Chemo_Four_Groups.png"),
-           print(p_km_chemo_os),
-           width = 12, height = 9, dpi = 300)
+    # Save using png device
+    png(file.path(output_dir, "figures", "Figure10_KM_OS_Chemo_Four_Groups.png"),
+        width = 12, height = 9, units = "in", res = 300)
+    print(p_km_chemo_os)
+    dev.off()
 
     cat("    - Figure 10 saved\n")
   }
@@ -2148,10 +2162,12 @@ if ("AGE_AT_DIAGNOSIS" %in% colnames(merged_data)) {
           legend.title = "BLVRB Status"
         )
 
-        ggsave(file.path(output_dir, "figures",
-                        sprintf("Figure12_%s_Age_Survival.png", age_label)),
-               print(p_km_age),
-               width = 9, height = 7, dpi = 300)
+        # Save using png device
+        png(file.path(output_dir, "figures",
+                     sprintf("Figure12_%s_Age_Survival.png", age_label)),
+            width = 9, height = 7, units = "in", res = 300)
+        print(p_km_age)
+        dev.off()
       }
     }
 
@@ -2323,10 +2339,12 @@ if ("SUBTYPE_SIMPLE" %in% colnames(merged_data)) {
                                  cox_p_subtype),
                    size = 4, hjust = 0)
 
-        ggsave(file.path(output_dir, "figures",
-                        sprintf("Figure14_%s_Subtype_Survival.png", subtype_label)),
-               print(p_km_subtype),
-               width = 10, height = 8, dpi = 300)
+        # Save using png device
+        png(file.path(output_dir, "figures",
+                     sprintf("Figure14_%s_Subtype_Survival.png", subtype_label)),
+            width = 10, height = 8, units = "in", res = 300)
+        print(p_km_subtype)
+        dev.off()
       }
     }
 

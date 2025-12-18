@@ -86,9 +86,30 @@ cat("PHASE 1: Loading and merging data...\n")
 # CHECK IF MERGED DATA ALREADY EXISTS
 # ==============================================================================
 
+# Prefer cleaned dataset (no NA values), fallback to original merged data
+merged_data_clean_file <- file.path(getwd(), "METABRIC_BLVRB_merged_data_clean.csv")
 merged_data_file <- file.path(getwd(), "METABRIC_BLVRB_merged_data.csv")
 
-if (file.exists(merged_data_file)) {
+if (file.exists(merged_data_clean_file)) {
+  cat("  Found CLEANED merged data file (complete cases only)! Loading...\n")
+  cat(sprintf("    - File: %s\n", merged_data_clean_file))
+
+  merged_data <- read.csv(merged_data_clean_file, stringsAsFactors = FALSE)
+
+  cat(sprintf("    - Loaded %d patients with %d columns\n", nrow(merged_data), ncol(merged_data)))
+  cat(sprintf("    - Dataset contains ONLY complete cases (no NA values)\n"))
+  cat(sprintf("    - Patients with BLVRB expression: %d\n", sum(!is.na(merged_data$BLVRB_EXPRESSION))))
+  cat(sprintf("    - Patients with BLVRB CNA: %d\n", sum(!is.na(merged_data$BLVRB_CNA))))
+
+  # Check chemotherapy data
+  if ("CHEMOTHERAPY" %in% colnames(merged_data)) {
+    cat("    - Chemotherapy data:\n")
+    print(table(merged_data$CHEMOTHERAPY, useNA = "always"))
+  }
+
+  cat("\n  Skipping data merging - using existing CLEANED dataset!\n")
+
+} else if (file.exists(merged_data_file)) {
   cat("  Found existing merged data file! Loading directly...\n")
   cat(sprintf("    - File: %s\n", merged_data_file))
 

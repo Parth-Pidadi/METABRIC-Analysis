@@ -24,11 +24,16 @@ knitr::opts_chunk$set(echo = TRUE)
 # Clear environment
 rm(list = ls())
 
-# Set working directory
-setwd("D:/SUNY RF Research/TCGA_BRCA_updated")
+# Set working directory - use current directory if the hardcoded path doesn't exist
+if (dir.exists("D:/SUNY RF Research/TCGA_BRCA_updated")) {
+  setwd("D:/SUNY RF Research/TCGA_BRCA_updated")
+} else {
+  # Use current working directory
+  cat("Using current working directory\n")
+}
 
 # Create output directory
-output_dir <- "D:/SUNY RF Research/TCGA_BRCA_updated/BLVRB_Analysis_Results"
+output_dir <- file.path(getwd(), "BLVRB_Analysis_Results")
 if (!dir.exists(output_dir)) {
   dir.create(output_dir, recursive = TRUE)
 }
@@ -77,8 +82,43 @@ cat("====================================\n\n")
 
 cat("PHASE 1: Loading and merging data...\n")
 
+# ==============================================================================
+# CHECK IF MERGED DATA ALREADY EXISTS
+# ==============================================================================
+
+merged_data_file <- file.path(getwd(), "METABRIC_BLVRB_merged_data.csv")
+
+if (file.exists(merged_data_file)) {
+  cat("  Found existing merged data file! Loading directly...\n")
+  cat(sprintf("    - File: %s\n", merged_data_file))
+
+  merged_data <- read.csv(merged_data_file, stringsAsFactors = FALSE)
+
+  cat(sprintf("    - Loaded %d patients with %d columns\n", nrow(merged_data), ncol(merged_data)))
+  cat(sprintf("    - Patients with BLVRB expression: %d\n", sum(!is.na(merged_data$BLVRB_EXPRESSION))))
+  cat(sprintf("    - Patients with BLVRB CNA: %d\n", sum(!is.na(merged_data$BLVRB_CNA))))
+
+  # Check chemotherapy data
+  if ("CHEMOTHERAPY" %in% colnames(merged_data)) {
+    cat("    - Chemotherapy data:\n")
+    print(table(merged_data$CHEMOTHERAPY, useNA = "always"))
+  }
+
+  cat("\n  Skipping data merging - using existing merged dataset!\n")
+
+} else {
+  cat("  Merged data not found. Will load and merge from raw files...\n")
+
 # Define data directory
-data_dir <- "D:/SUNY RF Research/TCGA_BRCA_updated/data/brca_metabric"
+data_dir <- file.path(getwd(), "data", "brca_metabric")
+
+# If data directory doesn't exist, try alternative paths
+if (!dir.exists(data_dir)) {
+  data_dir <- "D:/SUNY RF Research/TCGA_BRCA_updated/data/brca_metabric"
+  if (!dir.exists(data_dir)) {
+    stop("ERROR: Cannot find data directory. Please ensure raw data files are available or use the merged dataset.")
+  }
+}
 
 # ------------------------------------------------------------------------------
 # Step 1.1: Load Clinical Files (ROWS = PATIENTS)
@@ -452,6 +492,9 @@ write.csv(
   row.names = FALSE
 )
 cat("    - Saved to: METABRIC_BLVRB_merged_data.csv\n")
+
+# Close the else block for merged data check
+}
 
 # ==============================================================================
 # PHASE 2: EXPLORATORY ANALYSIS
@@ -870,21 +913,26 @@ if (length(missing_cols) > 0) {
   # Step 5.0: FIX - Convert RFS_STATUS to numeric format (0/1)
   # ------------------------------------------------------------------------------
   cat("  Converting RFS_STATUS to numeric format...\n")
-  
+
   # Check current format
   cat("    - Current RFS_STATUS values:\n")
   print(table(merged_data$RFS_STATUS, useNA = "always"))
-  
+
   # Convert to numeric (common formats in METABRIC)
   merged_data$RFS_STATUS_NUMERIC <- NA
-  
+
   # Check if it's already numeric
   if (is.numeric(merged_data$RFS_STATUS)) {
     merged_data$RFS_STATUS_NUMERIC <- merged_data$RFS_STATUS
     cat("    - RFS_STATUS is already numeric\n")
   } else if (is.character(merged_data$RFS_STATUS)) {
-    # Convert common string formats
+    # FIXED: Handle "0:Not Recurred" / "1:Recurred" format
+    # Extract first character before colon, or match full string patterns
     merged_data$RFS_STATUS_NUMERIC <- case_when(
+      # Match patterns with colon format (e.g., "1:Recurred")
+      grepl("^1:", merged_data$RFS_STATUS) ~ 1,
+      grepl("^0:", merged_data$RFS_STATUS) ~ 0,
+      # Match other common formats
       merged_data$RFS_STATUS %in% c("1", "Relapsed", "Recurred", "YES", "Yes", "Event", "DEAD") ~ 1,
       merged_data$RFS_STATUS %in% c("0", "Not Recurred", "NO", "No", "Censored", "Alive", "LIVING") ~ 0,
       TRUE ~ NA_real_
@@ -895,11 +943,15 @@ if (length(missing_cols) > 0) {
     merged_data$RFS_STATUS_NUMERIC <- as.numeric(as.character(merged_data$RFS_STATUS))
     cat("    - Attempted simple numeric conversion\n")
   }
-  
+
   # Verify conversion
   cat("    - Converted RFS_STATUS_NUMERIC values:\n")
   print(table(merged_data$RFS_STATUS_NUMERIC, useNA = "always"))
-  
+
+  cat(sprintf("    - Successfully converted %d events (1) and %d non-events (0)\n",
+              sum(merged_data$RFS_STATUS_NUMERIC == 1, na.rm = TRUE),
+              sum(merged_data$RFS_STATUS_NUMERIC == 0, na.rm = TRUE)))
+
   # Replace the original RFS_STATUS with numeric version
   merged_data$RFS_STATUS <- merged_data$RFS_STATUS_NUMERIC
   
@@ -1218,11 +1270,15 @@ if (length(missing_cols) > 0) {
     write.csv(mv_results,
               file.path(output_dir, "tables", "Table5_Chemotherapy_Multivariable.csv"),
               row.names = FALSE)
-    
+
     cat("    - Table 5 saved\n")
-    cat(sprintf("    - BLVRB remains significant: %s\n", 
+    cat(sprintf("    - BLVRB remains significant: %s\n",
                 ifelse(mv_results$p.value[1] < 0.05, "YES", "NO")))
+  } else {
+    cat(sprintf("    - WARNING: Insufficient data for multivariable analysis (n=%d)\n", nrow(chemo_mv_data)))
   }
+} else {
+  cat("    - WARNING: Chemotherapy analysis section was skipped\n")
 }
 
 # ==============================================================================
@@ -1242,12 +1298,20 @@ if (length(missing_cols) > 0) {
   cat(sprintf("  WARNING: Missing required columns: %s\n", paste(missing_cols, collapse = ", ")))
   cat("  Skipping hormone therapy analysis.\n")
 } else {
-  
+
   # Note: RFS_STATUS should already be converted from Phase 5 fix
   # If it wasn't converted, do it now
   if (!is.numeric(merged_data$RFS_STATUS)) {
     cat("  Converting RFS_STATUS to numeric format...\n")
-    merged_data$RFS_STATUS <- as.numeric(as.character(merged_data$RFS_STATUS))
+
+    # FIXED: Handle "0:Not Recurred" / "1:Recurred" format
+    merged_data$RFS_STATUS <- case_when(
+      grepl("^1:", merged_data$RFS_STATUS) ~ 1,
+      grepl("^0:", merged_data$RFS_STATUS) ~ 0,
+      merged_data$RFS_STATUS %in% c("1", "Recurred", "Event") ~ 1,
+      merged_data$RFS_STATUS %in% c("0", "Not Recurred", "Censored") ~ 0,
+      TRUE ~ as.numeric(as.character(merged_data$RFS_STATUS))
+    )
   }
   
   # ------------------------------------------------------------------------------
@@ -1538,21 +1602,25 @@ cat("====================================\n\n")
 # Step 7.1-7.3: ROC Analysis for Chemotherapy
 # ------------------------------------------------------------------------------
 
-if (exists("chemo_treated") && nrow(chemo_treated) > 100) {
-  
+if (exists("chemo_treated") && nrow(chemo_treated) > 10) {
+
   cat("  Performing ROC analysis for chemotherapy resistance...\n")
-  
+
   # Define early relapse (within 24 months)
   chemo_treated$EARLY_RELAPSE <- ifelse(
     chemo_treated$RFS_STATUS == 1 & chemo_treated$RFS_MONTHS <= 24,
     1, 0
   )
-  
+
   # Filter complete cases
   roc_chemo_data <- chemo_treated %>%
     dplyr::filter(!is.na(BLVRB_EXPRESSION), !is.na(EARLY_RELAPSE))
-  
-  if (nrow(roc_chemo_data) > 50 && sum(roc_chemo_data$EARLY_RELAPSE) > 10) {
+
+  cat(sprintf("    - ROC dataset: %d patients\n", nrow(roc_chemo_data)))
+  cat(sprintf("    - Early relapses (<24 months): %d\n", sum(roc_chemo_data$EARLY_RELAPSE)))
+  cat(sprintf("    - No early relapse: %d\n", sum(roc_chemo_data$EARLY_RELAPSE == 0)))
+
+  if (nrow(roc_chemo_data) > 30 && sum(roc_chemo_data$EARLY_RELAPSE) > 5) {
     
     # Calculate ROC
     roc_chemo <- roc(
@@ -1597,7 +1665,7 @@ if (exists("chemo_treated") && nrow(chemo_treated) > 100) {
     dev.off()
     
     cat("    - Figure 8A saved\n")
-    
+
     # Save ROC metrics
     roc_chemo_metrics <- data.frame(
       Analysis = "Chemotherapy Resistance",
@@ -1610,27 +1678,38 @@ if (exists("chemo_treated") && nrow(chemo_treated) > 100) {
       PPV = coords_chemo$ppv,
       NPV = coords_chemo$npv
     )
+  } else {
+    cat(sprintf("    - WARNING: Insufficient data for ROC analysis\n"))
+    cat(sprintf("      Need: >30 patients and >5 early relapses\n"))
+    cat(sprintf("      Have: %d patients, %d early relapses\n",
+                nrow(roc_chemo_data), sum(roc_chemo_data$EARLY_RELAPSE)))
   }
+} else {
+  cat("    - WARNING: Chemotherapy-treated cohort not available or too small for ROC analysis\n")
 }
 
 # ------------------------------------------------------------------------------
 # Step 7.4-7.5: ROC Analysis for Hormone Therapy
 # ------------------------------------------------------------------------------
 
-if (exists("hormone_treated") && nrow(hormone_treated) > 100) {
-  
+if (exists("hormone_treated") && nrow(hormone_treated) > 10) {
+
   cat("\n  Performing ROC analysis for hormone therapy resistance...\n")
-  
+
   # Define early relapse
   hormone_treated$EARLY_RELAPSE <- ifelse(
     hormone_treated$RFS_STATUS == 1 & hormone_treated$RFS_MONTHS <= 24,
     1, 0
   )
-  
+
   roc_hormone_data <- hormone_treated %>%
     dplyr::filter(!is.na(BLVRB_EXPRESSION), !is.na(EARLY_RELAPSE))
-  
-  if (nrow(roc_hormone_data) > 50 && sum(roc_hormone_data$EARLY_RELAPSE) > 10) {
+
+  cat(sprintf("    - ROC dataset: %d patients\n", nrow(roc_hormone_data)))
+  cat(sprintf("    - Early relapses (<24 months): %d\n", sum(roc_hormone_data$EARLY_RELAPSE)))
+  cat(sprintf("    - No early relapse: %d\n", sum(roc_hormone_data$EARLY_RELAPSE == 0)))
+
+  if (nrow(roc_hormone_data) > 30 && sum(roc_hormone_data$EARLY_RELAPSE) > 5) {
     
     roc_hormone <- roc(
       response = roc_hormone_data$EARLY_RELAPSE,
@@ -1702,7 +1781,14 @@ if (exists("hormone_treated") && nrow(hormone_treated) > 100) {
       
       cat("\n    - Table 8 saved\n")
     }
+  } else {
+    cat(sprintf("    - WARNING: Insufficient data for ROC analysis\n"))
+    cat(sprintf("      Need: >30 patients and >5 early relapses\n"))
+    cat(sprintf("      Have: %d patients, %d early relapses\n",
+                nrow(roc_hormone_data), sum(roc_hormone_data$EARLY_RELAPSE)))
   }
+} else {
+  cat("    - WARNING: Hormone-treated cohort not available or too small for ROC analysis\n")
 }
 
 # ==============================================================================

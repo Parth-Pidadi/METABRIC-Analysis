@@ -87,10 +87,35 @@ cat("PHASE 1: Loading and merging data...\n")
 # ==============================================================================
 
 # Prefer cleaned dataset (no NA values), fallback to original merged data
-merged_data_clean_file <- file.path(getwd(), "METABRIC_BLVRB_merged_data_clean.csv")
-merged_data_file <- file.path(getwd(), "METABRIC_BLVRB_merged_data.csv")
+# Check multiple possible locations
+possible_clean_files <- c(
+  file.path(getwd(), "METABRIC_BLVRB_merged_data_clean.csv"),
+  "METABRIC_BLVRB_merged_data_clean.csv",
+  file.path(output_dir, "data", "METABRIC_BLVRB_merged_data_clean.csv")
+)
 
-if (file.exists(merged_data_clean_file)) {
+merged_data_clean_file <- NULL
+for (f in possible_clean_files) {
+  if (file.exists(f)) {
+    merged_data_clean_file <- f
+    break
+  }
+}
+
+possible_merged_files <- c(
+  file.path(getwd(), "METABRIC_BLVRB_merged_data.csv"),
+  "METABRIC_BLVRB_merged_data.csv"
+)
+
+merged_data_file <- NULL
+for (f in possible_merged_files) {
+  if (file.exists(f)) {
+    merged_data_file <- f
+    break
+  }
+}
+
+if (!is.null(merged_data_clean_file)) {
   cat("  Found CLEANED merged data file (complete cases only)! Loading...\n")
   cat(sprintf("    - File: %s\n", merged_data_clean_file))
 
@@ -109,7 +134,7 @@ if (file.exists(merged_data_clean_file)) {
 
   cat("\n  Skipping data merging - using existing CLEANED dataset!\n")
 
-} else if (file.exists(merged_data_file)) {
+} else if (!is.null(merged_data_file)) {
   cat("  Found existing merged data file! Loading directly...\n")
   cat(sprintf("    - File: %s\n", merged_data_file))
 
@@ -1298,8 +1323,6 @@ if (length(missing_cols) > 0) {
   } else {
     cat(sprintf("    - WARNING: Insufficient data for multivariable analysis (n=%d)\n", nrow(chemo_mv_data)))
   }
-} else {
-  cat("    - WARNING: Chemotherapy analysis section was skipped\n")
 }
 
 # ==============================================================================

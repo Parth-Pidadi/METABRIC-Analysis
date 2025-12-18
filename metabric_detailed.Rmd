@@ -543,6 +543,38 @@ cat("    - Saved to: METABRIC_BLVRB_merged_data.csv\n")
 }
 
 # ==============================================================================
+# Ensure Derived Variables Exist (for both loaded and newly merged data)
+# ==============================================================================
+
+cat("\n  Verifying derived variables...\n")
+
+# Calculate median for histogram (always needed)
+median_blvrb <- median(merged_data$BLVRB_EXPRESSION, na.rm = TRUE)
+cat(sprintf("    - BLVRB median: %.3f\n", median_blvrb))
+
+# Create or verify BLVRB_EXPRESSION_GROUP if needed
+if (!"BLVRB_EXPRESSION_GROUP" %in% colnames(merged_data)) {
+  cat("    - Creating BLVRB_EXPRESSION_GROUP...\n")
+  merged_data$BLVRB_EXPRESSION_GROUP <- ifelse(
+    merged_data$BLVRB_EXPRESSION >= median_blvrb,
+    "BLVRB-high",
+    "BLVRB-low"
+  )
+}
+
+# Create or verify other derived variables if needed
+if (!"BLVRB_CNA_GROUP" %in% colnames(merged_data)) {
+  cat("    - Creating BLVRB_CNA_GROUP...\n")
+  merged_data$BLVRB_CNA_GROUP <- ifelse(
+    merged_data$BLVRB_CNA %in% c(-2, -1), "Deleted",
+    ifelse(merged_data$BLVRB_CNA == 0, "Neutral",
+           ifelse(merged_data$BLVRB_CNA %in% c(1, 2), "Amplified", NA))
+  )
+}
+
+cat("    - All derived variables verified\n")
+
+# ==============================================================================
 # PHASE 2: EXPLORATORY ANALYSIS
 # ==============================================================================
 
@@ -659,19 +691,23 @@ write.csv(expr_summary,
           row.names = FALSE)
 
 # Histogram
-p_hist <- ggplot(merged_data, aes(x = BLVRB_EXPRESSION)) +
-  geom_histogram(bins = 50, fill = "steelblue", color = "black", alpha = 0.7) +
-  geom_vline(xintercept = median_blvrb, color = "red", linetype = "dashed", size = 1) +
-  labs(title = "BLVRB Expression Distribution",
-       subtitle = sprintf("Median = %.3f (red dashed line)", median_blvrb),
-       x = "BLVRB Expression (log2)",
-       y = "Frequency") +
-  theme_bw(base_size = 12)
+tryCatch({
+  p_hist <- ggplot(merged_data, aes(x = BLVRB_EXPRESSION)) +
+    geom_histogram(bins = 50, fill = "steelblue", color = "black", alpha = 0.7) +
+    geom_vline(xintercept = median_blvrb, color = "red", linetype = "dashed", linewidth = 1) +
+    labs(title = "BLVRB Expression Distribution",
+         subtitle = sprintf("Median = %.3f (red dashed line)", median_blvrb),
+         x = "BLVRB Expression (log2)",
+         y = "Frequency") +
+    theme_bw(base_size = 12)
 
-ggsave(file.path(output_dir, "figures", "BLVRB_Expression_Histogram.png"),
-       p_hist, width = 8, height = 6, dpi = 300)
+  ggsave(file.path(output_dir, "figures", "BLVRB_Expression_Histogram.png"),
+         p_hist, width = 8, height = 6, dpi = 300)
 
-cat("    - Expression histogram saved\n")
+  cat("    - Expression histogram saved\n")
+}, error = function(e) {
+  cat(sprintf("    - WARNING: Failed to create histogram: %s\n", e$message))
+})
 
 # ------------------------------------------------------------------------------
 # Step 2.3: BLVRB Copy Number Distribution

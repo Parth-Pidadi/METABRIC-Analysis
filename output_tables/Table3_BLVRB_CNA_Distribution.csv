@@ -1,0 +1,6 @@
+"CNA_Value","N","Percent","Meaning"
+"-1",96,9.14285714285714,"Shallow deletion"
+"0",883,84.0952380952381,"Neutral/diploid"
+"1",64,6.09523809523809,"Low-level gain"
+"2",7,0.666666666666667,"Amplification"
+NA,0,0,"Missing"
